@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Car Telemetry</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>Car Telemetry</h1>
+      <p id="vehicle-subtitle">Waiting for vehicle…</p>
+    </div>
+    <div class="status-row">
+      <span id="badge-gps" class="badge">GPS</span>
+      <span id="badge-obd" class="badge">OBD</span>
+      <span id="badge-mqtt" class="badge">Cloud</span>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button data-tab="dashboard" class="active">Dashboard</button>
+    <button data-tab="signals">Signals</button>
+    <button data-tab="diagnostics">Diagnostics</button>
+    <button data-tab="setup">Setup</button>
+    <button data-tab="system">System</button>
+  </nav>
+
+  <main>
+    <section id="tab-dashboard" class="tab active">
+      <div class="hero-grid">
+        <div class="card hero"><span>Speed</span><strong id="speed">--</strong><small>km/h</small></div>
+        <div class="card hero"><span>RPM</span><strong id="rpm">--</strong><small>rpm</small></div>
+      </div>
+      <div class="metric-grid">
+        <div class="card"><span>Coolant</span><strong id="coolant">--</strong></div>
+        <div class="card"><span>Engine Load</span><strong id="load">--</strong></div>
+        <div class="card"><span>Throttle</span><strong id="throttle">--</strong></div>
+        <div class="card"><span>Fuel</span><strong id="fuel">--</strong></div>
+        <div class="card"><span>Voltage</span><strong id="voltage">--</strong></div>
+        <div class="card"><span>DTCs</span><strong id="dtc-count">--</strong></div>
+      </div>
+      <div class="card details">
+        <h2>Vehicle</h2>
+        <dl>
+          <div><dt>VIN</dt><dd id="vin">--</dd></div>
+          <div><dt>Protocol</dt><dd id="protocol">--</dd></div>
+          <div><dt>OBD transport</dt><dd id="transport">--</dd></div>
+          <div><dt>GPS</dt><dd id="gps-detail">--</dd></div>
+        </dl>
+      </div>
+    </section>
+
+    <section id="tab-signals" class="tab">
+      <div class="section-head">
+        <div><h2>Vehicle Signals</h2><p>Select extra supported PIDs to add to telemetry.</p></div>
+        <input id="signal-search" type="search" placeholder="Search signals" />
+      </div>
+      <div id="signal-list" class="list"></div>
+    </section>
+
+    <section id="tab-diagnostics" class="tab">
+      <div class="section-head">
+        <div><h2>Diagnostics</h2><p>DTCs are also scanned automatically in the background.</p></div>
+        <button id="refresh-dtc">Scan now</button>
+      </div>
+      <div class="diagnostic-grid">
+        <div class="card"><h3>Stored DTCs</h3><div id="stored-dtcs" class="dtc-list"></div></div>
+        <div class="card"><h3>Current-cycle DTCs</h3><div id="current-dtcs" class="dtc-list"></div></div>
+        <div class="card"><h3>Freeze-frame code</h3><div id="freeze-dtc" class="dtc-list"></div></div>
+      </div>
+      <div class="card danger">
+        <h3>Clear diagnostic codes</h3>
+        <p>This can clear stored DTCs and freeze-frame information. The engine must be off.</p>
+        <button id="clear-dtc" class="danger-button">Clear DTCs</button>
+      </div>
+      <div class="card"><h3>Recent DTC events</h3><div id="dtc-events" class="dtc-list"></div></div>
+    </section>
+
+    <section id="tab-setup" class="tab">
+      <div class="card">
+        <h2>OBD Connection</h2>
+        <p>Auto mode prefers USB ELM327 and falls back to Bluetooth RFCOMM.</p>
+        <div class="button-row">
+          <button class="transport-button" data-transport="auto">Auto</button>
+          <button class="transport-button" data-transport="usb">USB</button>
+          <button class="transport-button" data-transport="bluetooth">Bluetooth</button>
+          <button id="reconnect-obd">Reconnect OBD</button>
+        </div>
+        <div id="port-info" class="mono small"></div>
+      </div>
+
+      <div class="card">
+        <div class="section-head">
+          <div><h2>Bluetooth</h2><p>Bluetooth pairing happens on the Raspberry Pi through BlueZ.</p></div>
+          <button id="scan-bluetooth">Scan</button>
+        </div>
+        <div id="bluetooth-controller" class="small"></div>
+        <div id="bluetooth-list" class="list"></div>
+      </div>
+    </section>
+
+    <section id="tab-system" class="tab">
+      <div class="metric-grid">
+        <div class="card"><span>CPU</span><strong id="sys-cpu">--</strong></div>
+        <div class="card"><span>Temperature</span><strong id="sys-temp">--</strong></div>
+        <div class="card"><span>RAM available</span><strong id="sys-ram">--</strong></div>
+        <div class="card"><span>Disk free</span><strong id="sys-disk">--</strong></div>
+      </div>
+      <div class="card details">
+        <h2>Device</h2>
+        <dl>
+          <div><dt>Hostname</dt><dd id="sys-host">--</dd></div>
+          <div><dt>IP address</dt><dd id="sys-ip">--</dd></div>
+          <div><dt>Uptime</dt><dd id="sys-uptime">--</dd></div>
+          <div><dt>Agent</dt><dd id="sys-agent">--</dd></div>
+        </dl>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

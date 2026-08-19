@@ -1,0 +1,17 @@
+[Unit]
+Description=Car Telemetry LAN Web App
+After=network-online.target car-telemetry.service
+Wants=network-online.target car-telemetry.service
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__PROJECT_DIR__
+Environment=PYTHONUNBUFFERED=1
+Environment=TELEMETRY_ENV=__PROJECT_DIR__/config/telemetry.env
+ExecStart=__PROJECT_DIR__/.venv/bin/telemetry-web
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

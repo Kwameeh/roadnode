@@ -1,0 +1,22 @@
+# Documentation Index
+
+Current design: Pi Zero 2 W headless telemetry appliance with GPS, MPU6050, optional small OLED, python-OBD, dual USB/Bluetooth ELM327, MQTT and a LAN web app.
+
+Key files:
+
+- `01_PROJECT_OVERVIEW.md`
+- `06_HARDWARE_CONNECTIONS.md`
+- `09_SOFTWARE_ARCHITECTURE.md`
+- `12_DUAL_OBD_TRANSPORT.md`
+- `13_PYTHON_OBD_ARCHITECTURE.md`
+- `14_COMMAND_DISCOVERY.md`
+- `15_CORE_AND_OPTIONAL_SIGNALS.md`
+- `17_DTC_AND_DIAGNOSTICS.md`
+- `18_WEB_APP.md`
+- `19_BLUETOOTH_WEB_SETUP.md`
+- `20_WEB_BOOT_ACCESS.md`
+- `22_MQTT_AND_CLOUD.md`
+- `23_VEHICLE_PROFILES.md`
+- `26_COMMAND_REFERENCE.md`
+- `31_PERFORMANCE_BENCHMARK.md`
+- `CODE_REFERENCE.md`

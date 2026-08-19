@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "car-telemetry"
+version = "3.0.0"
+description = "Headless Raspberry Pi vehicle telemetry engine with python-OBD and LAN web app"
+requires-python = ">=3.9"
+dependencies = [
+  "obd==0.7.3",
+  "pyserial>=3.5,<4",
+  "pynmea2>=1.19,<2",
+  "paho-mqtt>=2,<3",
+  "pexpect>=4.9,<5",
+  "fastapi>=0.116,<1",
+  "uvicorn>=0.35,<1",
+  "adafruit-blinka>=8",
+  "adafruit-circuitpython-mpu6050>=1.2",
+  "adafruit-circuitpython-ssd1306>=2.12",
+  "Pillow>=10,<12"
+]
+
+[project.scripts]
+telemetry = "car_telemetry.cli:main"
+telemetry-engine = "car_telemetry.engine:main"
+telemetry-web = "car_telemetry.web_app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+car_telemetry = ["web_static/*"]

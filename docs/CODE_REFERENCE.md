@@ -1,0 +1,3280 @@
+# Complete Code Reference
+
+Every implementation/configuration file is listed below with its current contents.
+
+## `.github/workflows/ci.yml`
+
+```yaml
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e . pytest
+      - run: python -m compileall -q src
+      - run: pytest -q
+```
+
+## `config/telemetry.env.example`
+
+```bash
+# ---------------------------------------------------------------------------
+# DEVICE IDENTITY
+# ---------------------------------------------------------------------------
+DEVICE_ID=PROTO-001
+VEHICLE_ID=VEH-001
+PROTOTYPE_STAGE=1
+
+# ---------------------------------------------------------------------------
+# GPS
+# ---------------------------------------------------------------------------
+GPS_ENABLED=true
+GPS_PORT=/dev/serial0
+GPS_BAUD=9600
+
+# ---------------------------------------------------------------------------
+# MPU6050
+# ---------------------------------------------------------------------------
+IMU_ENABLED=true
+IMU_ADDRESS=0x68
+IMU_RATE_HZ=20
+IMU_CALIBRATION_SAMPLES=150
+HARSH_ACCEL_MPS2=3.0
+HARSH_BRAKE_MPS2=-3.0
+HARSH_CORNER_MPS2=3.5
+IMPACT_G=2.5
+
+# ---------------------------------------------------------------------------
+# SMALL OLED - optional secondary status display
+# ---------------------------------------------------------------------------
+OLED_ENABLED=true
+OLED_ADDRESS=0x3C
+OLED_WIDTH=128
+OLED_HEIGHT=64
+
+# ---------------------------------------------------------------------------
+# OBD / python-OBD
+# auto prefers a detected USB ELM327, then /dev/rfcomm0 Bluetooth.
+# ---------------------------------------------------------------------------
+OBD_ENABLED=true
+OBD_TRANSPORT=auto
+OBD_USB_PORT=auto
+OBD_BLUETOOTH_PORT=/dev/rfcomm0
+OBD_MAC=
+OBD_RFCOMM_CHANNEL=1
+OBD_BAUD=auto
+OBD_PROTOCOL=auto
+OBD_FAST=true
+OBD_TIMEOUT=0.2
+OBD_ASYNC_LOOP_DELAY=0.10
+OBD_RECONNECT_SECONDS=4
+OBD_CORE_SIGNALS=RPM,SPEED,COOLANT_TEMP,ENGINE_LOAD,THROTTLE_POS,CONTROL_MODULE_VOLTAGE,FUEL_LEVEL,INTAKE_TEMP,MAF
+
+# DTC collection
+DTC_SCAN_SECONDS=60
+DTC_MAX_EVENTS=100
+DTC_CLEAR_REQUIRE_ENGINE_OFF=true
+
+# Per-vehicle profile storage. VIN is used as the profile key when available.
+VEHICLE_PROFILE_DIR=~/.local/share/car-telemetry/vehicles
+
+# ---------------------------------------------------------------------------
+# INTERNAL ENGINE API - localhost only
+# ---------------------------------------------------------------------------
+API_HOST=127.0.0.1
+API_PORT=8765
+
+# ---------------------------------------------------------------------------
+# LAN WEB APP
+# Open http://<pi-hostname>.local:8080 from a phone/laptop on the same network.
+# ---------------------------------------------------------------------------
+WEB_ENABLED=true
+WEB_HOST=0.0.0.0
+WEB_PORT=8080
+WEB_STATE_REFRESH_SECONDS=0.5
+BLUETOOTH_SCAN_SECONDS=10
+
+# ---------------------------------------------------------------------------
+# MQTT
+# ---------------------------------------------------------------------------
+MQTT_ENABLED=false
+MQTT_HOST=
+MQTT_PORT=1883
+MQTT_TOPIC=vehicles/VEH-001/telemetry
+MQTT_DTC_TOPIC=vehicles/VEH-001/dtc
+MQTT_METADATA_TOPIC=vehicles/VEH-001/metadata
+MQTT_USERNAME=
+MQTT_PASSWORD=
+MQTT_TLS=false
+MQTT_CA_CERT=
+MQTT_CLIENT_CERT=
+MQTT_CLIENT_KEY=
+MQTT_PUBLISH_SECONDS=2
+
+# ---------------------------------------------------------------------------
+# RUNTIME STATE
+# ---------------------------------------------------------------------------
+STATUS_FILE=~/.local/state/car-telemetry/status.json
+```
+
+## `pyproject.toml`
+
+```toml
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "car-telemetry"
+version = "3.0.0"
+description = "Headless Raspberry Pi vehicle telemetry engine with python-OBD and LAN web app"
+requires-python = ">=3.9"
+dependencies = [
+  "obd==0.7.3",
+  "pyserial>=3.5,<4",
+  "pynmea2>=1.19,<2",
+  "paho-mqtt>=2,<3",
+  "pexpect>=4.9,<5",
+  "fastapi>=0.116,<1",
+  "uvicorn>=0.35,<1",
+  "adafruit-blinka>=8",
+  "adafruit-circuitpython-mpu6050>=1.2",
+  "adafruit-circuitpython-ssd1306>=2.12",
+  "Pillow>=10,<12"
+]
+
+[project.scripts]
+telemetry = "car_telemetry.cli:main"
+telemetry-engine = "car_telemetry.engine:main"
+telemetry-web = "car_telemetry.web_app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+car_telemetry = ["web_static/*"]
+```
+
+## `scripts/benchmark.sh`
+
+```bash
+#!/usr/bin/env bash
+set -Eeuo pipefail
+PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$PROJECT_DIR"
+if [[ -x .venv/bin/telemetry ]]; then
+  exec .venv/bin/telemetry benchmark "$@"
+fi
+exec python3 -m car_telemetry.benchmark "$@"
+```
+
+## `scripts/install.sh`
+
+```bash
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+USER_NAME="${SUDO_USER:-$USER}"
+
+echo "============================================================"
+echo " Car Telemetry Headless Installer"
+echo " Project: ${PROJECT_DIR}"
+echo " User:    ${USER_NAME}"
+echo "============================================================"
+
+sudo apt update
+sudo apt install -y \
+  git \
+  python3-venv \
+  python3-pip \
+  python3-dev \
+  i2c-tools \
+  bluez \
+  bluetooth \
+  rfkill \
+  avahi-daemon \
+  libjpeg-dev \
+  zlib1g-dev \
+  libopenjp2-7 \
+  libtiff6
+
+sudo raspi-config nonint do_ssh 0 || true
+sudo raspi-config nonint do_i2c 0 || true
+sudo raspi-config nonint do_serial_hw 0 || true
+sudo raspi-config nonint do_serial_cons 1 || true
+sudo usermod -aG dialout,i2c,bluetooth "$USER_NAME"
+
+python3 -m venv --system-site-packages "$PROJECT_DIR/.venv"
+"$PROJECT_DIR/.venv/bin/pip" install --upgrade pip setuptools wheel
+"$PROJECT_DIR/.venv/bin/pip" install -e "$PROJECT_DIR"
+
+if [[ ! -f "$PROJECT_DIR/config/telemetry.env" ]]; then
+  cp "$PROJECT_DIR/config/telemetry.env.example" "$PROJECT_DIR/config/telemetry.env"
+fi
+
+sed \
+  -e "s|__USER__|$USER_NAME|g" \
+  -e "s|__PROJECT_DIR__|$PROJECT_DIR|g" \
+  "$PROJECT_DIR/systemd/car-telemetry.service.template" \
+  | sudo tee /etc/systemd/system/car-telemetry.service >/dev/null
+
+sed \
+  -e "s|__PROJECT_DIR__|$PROJECT_DIR|g" \
+  "$PROJECT_DIR/systemd/car-telemetry-obd-link.service.template" \
+  | sudo tee /etc/systemd/system/car-telemetry-obd-link.service >/dev/null
+
+sed \
+  -e "s|__USER__|$USER_NAME|g" \
+  -e "s|__PROJECT_DIR__|$PROJECT_DIR|g" \
+  "$PROJECT_DIR/systemd/car-telemetry-web.service.template" \
+  | sudo tee /etc/systemd/system/car-telemetry-web.service >/dev/null
+
+sudo systemctl daemon-reload
+sudo systemctl enable bluetooth.service avahi-daemon.service
+sudo systemctl enable car-telemetry-obd-link.service car-telemetry.service car-telemetry-web.service
+
+sudo ln -sf "$PROJECT_DIR/.venv/bin/telemetry" /usr/local/bin/telemetry
+
+# Keep the safe shutdown button on GPIO4 / physical pin 7.
+BOOT=/boot/firmware/config.txt
+[[ -f "$BOOT" ]] || BOOT=/boot/config.txt
+OVERLAY='dtoverlay=gpio-shutdown,gpio_pin=4,active_low=1,gpio_pull=up,debounce=1000'
+grep -Fqx "$OVERLAY" "$BOOT" || echo "$OVERLAY" | sudo tee -a "$BOOT" >/dev/null
+
+cat <<MSG
+
+Installed.
+
+Reboot once:
+  sudo reboot
+
+After reboot:
+  telemetry status
+  telemetry web-url
+
+Then open the shown URL from a phone/laptop on the same network.
+MSG
+```
+
+## `scripts/obd-link.sh`
+
+```bash
+#!/usr/bin/env bash
+set -u
+
+ENV_FILE="${1:-}"
+if [[ -z "$ENV_FILE" ]]; then
+  echo "Usage: obd-link.sh /path/to/telemetry.env" >&2
+  exit 2
+fi
+
+cleanup() {
+  rfcomm release rfcomm0 >/dev/null 2>&1 || true
+}
+trap cleanup EXIT INT TERM
+
+while true; do
+  if [[ ! -f "$ENV_FILE" ]]; then
+    sleep 5
+    continue
+  fi
+
+  set -a
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+  set +a
+
+  rfkill unblock bluetooth >/dev/null 2>&1 || true
+  systemctl start bluetooth.service >/dev/null 2>&1 || true
+  bluetoothctl power on >/dev/null 2>&1 || true
+
+  MODE="${OBD_TRANSPORT:-auto}"
+  MAC="${OBD_MAC:-}"
+  CHANNEL="${OBD_RFCOMM_CHANNEL:-1}"
+  ENABLED="${OBD_ENABLED:-true}"
+
+  if [[ "${ENABLED,,}" != "true" ]]; then
+    cleanup
+    sleep 5
+    continue
+  fi
+
+  # In USB-only mode RFCOMM is unnecessary. In auto mode, USB wins while present.
+  if [[ "$MODE" == "usb" ]] || { [[ "$MODE" == "auto" ]] && { compgen -G '/dev/ttyUSB*' >/dev/null || compgen -G '/dev/ttyACM*' >/dev/null || compgen -G '/dev/serial/by-id/*' >/dev/null; }; }; then
+    cleanup
+    sleep 5
+    continue
+  fi
+
+  if [[ -n "$MAC" ]]; then
+    bluetoothctl trust "$MAC" >/dev/null 2>&1 || true
+    bluetoothctl connect "$MAC" >/dev/null 2>&1 || true
+    if [[ ! -e /dev/rfcomm0 ]]; then
+      rfcomm bind rfcomm0 "$MAC" "$CHANNEL" >/dev/null 2>&1 || true
+    fi
+  fi
+
+  sleep 5
+done
+```
+
+## `scripts/update.sh`
+
+```bash
+#!/usr/bin/env bash
+set -Eeuo pipefail
+PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$PROJECT_DIR"
+git pull --ff-only
+"$PROJECT_DIR/.venv/bin/pip" install -e "$PROJECT_DIR"
+sudo systemctl restart car-telemetry-obd-link.service
+sudo systemctl restart car-telemetry.service
+sudo systemctl restart car-telemetry-web.service
+telemetry status || true
+```
+
+## `src/car_telemetry/__init__.py`
+
+```python
+__version__ = "3.0.0"
+```
+
+## `src/car_telemetry/api_server.py`
+
+```python
+from __future__ import annotations
+
+import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from . import bluetooth
+from .config import Settings, set_env_values, settings as load_settings
+from .obd_transport import resolve, usb_candidates
+
+
+class APIServer:
+    def __init__(self, settings: Settings, state, obd_service, stop_event):
+        self.settings = settings
+        self.host = settings.api_host
+        self.port = settings.api_port
+        self.state = state
+        self.obd = obd_service
+        self.stop_event = stop_event
+        self.server = None
+
+    def handler(self):
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def send_json(self, status: int, payload):
+                raw = json.dumps(payload, default=str).encode('utf-8')
+                self.send_response(status)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def body(self):
+                try:
+                    length = int(self.headers.get('Content-Length', '0') or 0)
+                    return json.loads(self.rfile.read(length) or b'{}')
+                except Exception:
+                    return {}
+
+            def do_GET(self):
+                snapshot = outer.state.snapshot()
+                if self.path == '/state':
+                    return self.send_json(200, snapshot)
+                if self.path == '/signals':
+                    obd = snapshot.get('obd', {})
+                    return self.send_json(
+                        200,
+                        {
+                            'supported': obd.get('supportedSignals', []),
+                            'core': obd.get('coreSignals', []),
+                            'selected': obd.get('selectedSignals', []),
+                            'userSelected': obd.get('userSelectedSignals', []),
+                        },
+                    )
+                if self.path == '/vehicle':
+                    obd = snapshot.get('obd', {})
+                    return self.send_json(
+                        200,
+                        {
+                            'vehicle': obd.get('vehicle', {}),
+                            'vehicleProfileKey': obd.get('vehicleProfileKey'),
+                            'protocolName': obd.get('protocolName'),
+                            'transport': obd.get('transport'),
+                        },
+                    )
+                if self.path == '/dtc':
+                    obd = snapshot.get('obd', {})
+                    return self.send_json(
+                        200,
+                        {
+                            'dtc': obd.get('dtc', {}),
+                            'events': obd.get('dtcEvents', []),
+                        },
+                    )
+                if self.path == '/obd/ports':
+                    fresh = load_settings()
+                    try:
+                        selected = resolve(fresh, outer.obd.transport_override)
+                        selected_payload = {'kind': selected.kind, 'port': selected.port}
+                    except Exception as exc:
+                        selected_payload = {'kind': None, 'port': None, 'error': str(exc)}
+                    return self.send_json(
+                        200,
+                        {
+                            'mode': outer.obd.transport_override or fresh.obd_transport,
+                            'usb': usb_candidates(),
+                            'bluetoothPort': fresh.obd_bluetooth_port,
+                            'selected': selected_payload,
+                        },
+                    )
+                if self.path == '/bluetooth/status':
+                    fresh = load_settings()
+                    return self.send_json(
+                        200,
+                        {
+                            'controller': bluetooth.controller_status(),
+                            'devices': bluetooth.devices(),
+                            'configuredElmMac': fresh.obd_mac,
+                            'configuredRfcommChannel': fresh.obd_rfcomm_channel,
+                        },
+                    )
+                return self.send_json(404, {'error': 'not found'})
+
+            def do_POST(self):
+                body = self.body()
+                try:
+                    if self.path == '/signals/select':
+                        outer.obd.select_signal(str(body.get('name', '')), bool(body.get('selected', True)))
+                        return self.send_json(200, {'ok': True})
+
+                    if self.path == '/obd/reconnect':
+                        outer.obd.reconnect()
+                        return self.send_json(200, {'ok': True})
+
+                    if self.path == '/obd/transport':
+                        transport = str(body.get('transport', 'auto')).lower()
+                        if transport not in {'auto', 'usb', 'bluetooth'}:
+                            raise ValueError('transport must be auto, usb, or bluetooth')
+                        values = {'OBD_TRANSPORT': transport}
+                        port = str(body.get('usbPort', '')).strip()
+                        if port:
+                            values['OBD_USB_PORT'] = port
+                        set_env_values(values)
+                        outer.obd.set_transport(transport)
+                        return self.send_json(200, {'ok': True, 'transport': transport})
+
+                    if self.path == '/dtc/refresh':
+                        return self.send_json(200, {'dtc': outer.obd.refresh_dtcs()})
+
+                    if self.path == '/dtc/clear':
+                        return self.send_json(
+                            200,
+                            {'result': outer.obd.clear_dtcs(str(body.get('confirm', '')))},
+                        )
+
+                    if self.path == '/bluetooth/scan':
+                        seconds = int(body.get('seconds', outer.settings.bluetooth_scan_seconds))
+                        return self.send_json(200, {'devices': bluetooth.scan(seconds)})
+
+                    if self.path == '/bluetooth/pair':
+                        mac = str(body.get('mac', ''))
+                        pin = str(body.get('pin', '')).strip() or None
+                        return self.send_json(200, {'device': bluetooth.pair(mac, pin)})
+
+                    if self.path == '/bluetooth/disconnect':
+                        return self.send_json(200, {'device': bluetooth.disconnect(str(body.get('mac', '')))})
+
+                    if self.path == '/bluetooth/forget':
+                        return self.send_json(200, bluetooth.forget(str(body.get('mac', ''))))
+
+                    if self.path == '/bluetooth/use-elm':
+                        mac = bluetooth.validate_mac(str(body.get('mac', '')))
+                        channel = body.get('channel')
+                        if channel in (None, '', 0, '0'):
+                            channel = bluetooth.discover_channel(mac)
+                        if channel is None:
+                            raise RuntimeError('No ELM327/Serial Port RFCOMM channel was found on this Bluetooth device')
+                        channel = int(channel)
+                        set_env_values(
+                            {
+                                'OBD_ENABLED': 'true',
+                                'OBD_TRANSPORT': 'bluetooth',
+                                'OBD_MAC': mac,
+                                'OBD_RFCOMM_CHANNEL': str(channel),
+                            }
+                        )
+                        outer.obd.set_transport('bluetooth')
+                        return self.send_json(
+                            200,
+                            {
+                                'ok': True,
+                                'mac': mac,
+                                'channel': channel,
+                                'message': 'Saved. The root RFCOMM link service will create /dev/rfcomm0 automatically.',
+                            },
+                        )
+                except Exception as exc:
+                    return self.send_json(409, {'error': str(exc)})
+
+                return self.send_json(404, {'error': 'not found'})
+
+        return Handler
+
+    def run(self):
+        self.server = ThreadingHTTPServer((self.host, self.port), self.handler())
+        self.server.timeout = 0.5
+        while not self.stop_event.is_set():
+            self.server.handle_request()
+        self.server.server_close()
+```
+
+## `src/car_telemetry/benchmark.py`
+
+```python
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import random
+import statistics
+import subprocess
+import tempfile
+import threading
+import time
+from collections import deque
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable
+
+from PIL import Image, ImageDraw
+
+from .state import DeviceState
+
+MB = 1024 * 1024
+
+
+@dataclass
+class LoopStats:
+    name: str
+    interval: float
+    samples: int = 0
+    deadline_misses: int = 0
+    latencies_ms: list[float] = field(default_factory=list)
+
+    def record(self, elapsed: float, missed: bool) -> None:
+        self.samples += 1
+        if missed:
+            self.deadline_misses += 1
+        if len(self.latencies_ms) < 20_000:
+            self.latencies_ms.append(elapsed * 1000.0)
+
+    def summary(self) -> dict:
+        values = self.latencies_ms or [0.0]
+        ordered = sorted(values)
+        p95 = ordered[max(0, math.ceil(len(ordered) * 0.95) - 1)]
+        miss = self.deadline_misses * 100.0 / self.samples if self.samples else 0.0
+        return {
+            'samples': self.samples,
+            'deadlineMisses': self.deadline_misses,
+            'deadlineMissPercent': round(miss, 3),
+            'meanWorkMs': round(statistics.fmean(values), 3),
+            'p95WorkMs': round(p95, 3),
+            'maxWorkMs': round(max(values), 3),
+            'targetIntervalMs': round(self.interval * 1000.0, 3),
+        }
+
+
+def _proc_rss_mb() -> float:
+    try:
+        pages = int(Path('/proc/self/statm').read_text().split()[1])
+        return pages * os.sysconf('SC_PAGE_SIZE') / MB
+    except Exception:
+        return 0.0
+
+
+def _meminfo() -> dict[str, float]:
+    result: dict[str, float] = {}
+    try:
+        for raw in Path('/proc/meminfo').read_text().splitlines():
+            key, rest = raw.split(':', 1)
+            result[key] = float(rest.strip().split()[0]) / 1024.0
+    except Exception:
+        pass
+    return result
+
+
+def _cpu_snapshot() -> tuple[int, int] | None:
+    try:
+        fields = [int(x) for x in Path('/proc/stat').read_text().splitlines()[0].split()[1:]]
+        idle = fields[3] + (fields[4] if len(fields) > 4 else 0)
+        return sum(fields), idle
+    except Exception:
+        return None
+
+
+def _cpu_percent(before, after) -> float | None:
+    if not before or not after:
+        return None
+    total = after[0] - before[0]
+    idle = after[1] - before[1]
+    if total <= 0:
+        return None
+    return max(0.0, min(100.0, (total - idle) * 100.0 / total))
+
+
+def _temperature_c() -> float | None:
+    for path in (Path('/sys/class/thermal/thermal_zone0/temp'), Path('/sys/devices/virtual/thermal/thermal_zone0/temp')):
+        try:
+            return float(path.read_text().strip()) / 1000.0
+        except Exception:
+            pass
+    return None
+
+
+def _throttled() -> str | None:
+    try:
+        process = subprocess.run(['vcgencmd', 'get_throttled'], capture_output=True, text=True, timeout=2, check=False)
+        return process.stdout.strip() or None
+    except Exception:
+        return None
+
+
+def _load_project_libraries() -> dict[str, str]:
+    modules = {
+        'python-obd': 'obd',
+        'pyserial': 'serial',
+        'pynmea2': 'pynmea2',
+        'paho-mqtt': 'paho.mqtt.client',
+        'FastAPI': 'fastapi',
+        'Uvicorn': 'uvicorn',
+        'pexpect': 'pexpect',
+        'Pillow': 'PIL.Image',
+    }
+    result = {}
+    for label, module in modules.items():
+        try:
+            __import__(module)
+            result[label] = 'loaded'
+        except Exception as exc:
+            result[label] = f'unavailable: {exc}'
+    return result
+
+
+def quantity(value: float, unit: str) -> dict:
+    return {'value': round(value, 3), 'unit': unit}
+
+
+class SyntheticWorkload:
+    def __init__(self, stress: float, reserve_mb: int, web_clients: int, status_path: Path):
+        self.stress = max(0.25, stress)
+        self.reserve_mb = max(0, reserve_mb)
+        self.web_clients = max(0, web_clients)
+        self.status_path = status_path
+        self.stop = threading.Event()
+        self.state = DeviceState('BENCH-001', 'SIMULATED-VEHICLE', 1)
+        self.stats: dict[str, LoopStats] = {}
+        self.events = deque(maxlen=500)
+        self.reserve: bytearray | None = None
+        self.signal_names = [
+            'RPM', 'SPEED', 'COOLANT_TEMP', 'ENGINE_LOAD', 'THROTTLE_POS',
+            'CONTROL_MODULE_VOLTAGE', 'FUEL_LEVEL', 'INTAKE_TEMP', 'MAF',
+            'OIL_TEMP', 'FUEL_RATE', 'TIMING_ADVANCE', 'BAROMETRIC_PRESSURE',
+            'SHORT_FUEL_TRIM_1', 'LONG_FUEL_TRIM_1',
+        ]
+        supported = [
+            {'name': name, 'description': name.replace('_', ' ').title(), 'mode': 1}
+            for name in self.signal_names
+        ]
+        self.state.merge('obd', {
+            'enabled': True,
+            'connected': True,
+            'transport': 'simulated-usb',
+            'protocolName': 'ISO 15765-4 CAN (simulated)',
+            'vehicleProfileKey': 'BENCHMARKVIN1234567',
+            'vehicle': {'VIN': 'BENCHMARKVIN1234567', 'protocolName': 'ISO 15765-4 CAN (simulated)'},
+            'supportedSignals': supported,
+            'supportedCount': len(supported),
+            'coreSignals': self.signal_names[:9],
+            'selectedSignals': self.signal_names,
+            'signals': {},
+            'dtc': {'stored': [], 'currentCycle': [], 'storedCount': 0, 'currentCycleCount': 0},
+            'dtcEvents': [],
+        })
+        self.state.merge('gps', {'enabled': True, 'received': True, 'validFix': True})
+        self.state.merge('imu', {'enabled': True, 'calibrated': True})
+        self.state.merge('mqtt', {'enabled': True, 'connected': True})
+        self.state.merge('system', {'hostname': 'benchmark-pi', 'ipAddress': '192.168.1.50'})
+
+    def allocate_reserve(self):
+        if self.reserve_mb:
+            self.reserve = bytearray(self.reserve_mb * MB)
+            for index in range(0, len(self.reserve), MB):
+                self.reserve[index] = (index // MB) % 251
+
+    def _loop(self, name: str, hz: float, work: Callable[[int], None]):
+        interval = 1.0 / max(0.1, hz * self.stress)
+        stats = LoopStats(name, interval)
+        self.stats[name] = stats
+        deadline = time.perf_counter()
+        counter = 0
+        while not self.stop.is_set():
+            deadline += interval
+            started = time.perf_counter()
+            try:
+                work(counter)
+            except Exception as exc:
+                self.events.append({'worker': name, 'error': str(exc), 'time': time.time()})
+            elapsed = time.perf_counter() - started
+            remaining = deadline - time.perf_counter()
+            stats.record(elapsed, remaining < 0)
+            counter += 1
+            if remaining > 0:
+                self.stop.wait(remaining)
+            elif -remaining > interval * 4:
+                deadline = time.perf_counter()
+
+    def imu_work(self, n: int):
+        t = n / 20.0
+        ax, ay, az = math.sin(t) * 0.8, math.sin(t * 0.43) * 0.5, math.cos(t * 0.17) * 0.12
+        resultant = math.sqrt((9.80665 + az) ** 2 + ax ** 2 + ay ** 2) / 9.80665
+        self.state.merge('imu', {
+            'linearAccelerationMps2': {'x': ax, 'y': ay, 'z': az},
+            'gyroRadPerSec': {'x': ay / 8, 'y': ax / 8, 'z': math.sin(t) / 10},
+            'resultantG': resultant,
+            'temperatureC': 31.5,
+        })
+
+    def gps_work(self, n: int):
+        self.state.merge('gps', {
+            'latitude': 5.6037 + math.sin(n / 50) * 0.001,
+            'longitude': -0.1870 + math.cos(n / 50) * 0.001,
+            'speedKph': 45 + n % 25,
+            'headingDegrees': (n * 4) % 360,
+            'satellites': 8 + n % 4,
+            'hdop': 1.1,
+            'lastDataUnix': time.time(),
+        })
+
+    def obd_work(self, n: int):
+        name = self.signal_names[n % len(self.signal_names)]
+        phase = n / 13.0
+        values = {
+            'RPM': quantity(900 + abs(math.sin(phase)) * 3400, 'rpm'),
+            'SPEED': quantity(20 + abs(math.sin(phase / 3)) * 100, 'km/h'),
+            'COOLANT_TEMP': quantity(82 + abs(math.sin(phase / 20)) * 12, 'degC'),
+            'ENGINE_LOAD': quantity(20 + abs(math.sin(phase)) * 65, 'percent'),
+            'THROTTLE_POS': quantity(8 + abs(math.sin(phase * 1.4)) * 75, 'percent'),
+            'CONTROL_MODULE_VOLTAGE': quantity(13.7 + math.sin(phase / 8) * 0.4, 'V'),
+            'FUEL_LEVEL': quantity(62.0, 'percent'),
+            'INTAKE_TEMP': quantity(34.0, 'degC'),
+            'MAF': quantity(3 + abs(math.sin(phase)) * 42, 'g/s'),
+            'OIL_TEMP': quantity(90.0, 'degC'),
+            'FUEL_RATE': quantity(5.4, 'L/h'),
+            'TIMING_ADVANCE': quantity(11.0, 'degree'),
+            'BAROMETRIC_PRESSURE': quantity(101.0, 'kPa'),
+            'SHORT_FUEL_TRIM_1': quantity(1.4, 'percent'),
+            'LONG_FUEL_TRIM_1': quantity(-0.9, 'percent'),
+        }
+        self.state.merge_nested('obd', 'signals', {name: {'value': values[name], 'updatedAt': time.time()}})
+
+    def dtc_work(self, n: int):
+        has_code = n % 2 == 1
+        stored = [{'code': 'P0420', 'description': 'Catalyst System Efficiency Below Threshold'}] if has_code else []
+        events = self.state.snapshot().get('obd', {}).get('dtcEvents', [])[-50:]
+        events.append({'seq': n + 1, 'timestamp': time.time(), 'event': 'DTC_ADDED' if has_code else 'DTC_REMOVED', 'scope': 'stored', 'code': 'P0420'})
+        self.state.merge('obd', {'dtc': {'stored': stored, 'currentCycle': [], 'storedCount': len(stored), 'currentCycleCount': 0, 'lastScanAt': time.time()}, 'dtcEvents': events})
+
+    def mqtt_work(self, _n: int):
+        snap = self.state.snapshot()
+        raw = json.dumps({'messageType': 'TELEMETRY', 'gps': snap['gps'], 'imu': snap['imu'], 'obd': snap['obd'], 'events': snap['events']}, separators=(',', ':'), default=str).encode()
+        framed = b'MQTT' + len(raw).to_bytes(4, 'big') + raw
+        self.state.merge('mqtt', {'lastPublishOk': True, 'lastPayloadBytes': len(framed), 'lastPublishAt': time.time()})
+
+    def status_work(self, _n: int):
+        data = json.dumps(self.state.snapshot(), separators=(',', ':'), default=str)
+        temp = self.status_path.with_suffix('.tmp')
+        temp.write_text(data, encoding='utf-8')
+        temp.replace(self.status_path)
+
+    def oled_work(self, _n: int):
+        image = Image.new('1', (128, 64), 0)
+        draw = ImageDraw.Draw(image)
+        draw.text((0, 0), 'CAR TELEMETRY', fill=1)
+        image.tobytes()
+
+    def web_work(self, _n: int):
+        snapshot = self.state.snapshot()
+        base = json.dumps(snapshot, separators=(',', ':'), default=str).encode()
+        # Approximate a state endpoint plus one WebSocket frame per connected browser.
+        for client in range(self.web_clients):
+            envelope = b'WS' + client.to_bytes(2, 'big', signed=False) + len(base).to_bytes(4, 'big') + base
+            if not envelope:
+                raise RuntimeError('empty web frame')
+
+    def event_log_work(self, n: int):
+        if n % 5 == 0:
+            self.events.append({'timestamp': time.time(), 'event': random.choice(['normal', 'normal', 'harshBrakeTest'])})
+        json.dumps(list(self.events), separators=(',', ':'))
+
+    def start(self):
+        workers = [
+            ('imu', 20.0, self.imu_work),
+            ('gps', 1.0, self.gps_work),
+            ('obd', 12.0, self.obd_work),
+            ('dtc-scan', 1 / 30.0, self.dtc_work),
+            ('mqtt', 0.5, self.mqtt_work),
+            ('status-file', 1.0, self.status_work),
+            ('oled', 2.0, self.oled_work),
+            ('web-stream', 2.0, self.web_work),
+            ('event-log', 2.0, self.event_log_work),
+        ]
+        threads = []
+        for name, hz, func in workers:
+            thread = threading.Thread(target=self._loop, args=(name, hz, func), daemon=True, name=f'bench-{name}')
+            thread.start()
+            threads.append(thread)
+        return threads
+
+
+def _grade(report: dict) -> tuple[str, list[str]]:
+    metrics = report['metrics']
+    workers = report['workers']
+    reasons: list[str] = []
+    fail = warn = False
+
+    available = metrics.get('minSystemAvailableMb')
+    cpu = metrics.get('averageSystemCpuPercent')
+    growth = metrics.get('processRssGrowthMb', 0.0)
+    misses = max((item['deadlineMissPercent'] for item in workers.values()), default=0.0)
+    web_p95 = workers.get('web-stream', {}).get('p95WorkMs', 0.0)
+    throttled = str(metrics.get('throttledEnd') or '')
+
+    if available is not None:
+        if available < 50:
+            fail = True; reasons.append(f'available RAM fell below 50 MB ({available:.1f} MB)')
+        elif available < 80:
+            warn = True; reasons.append(f'available RAM fell below preferred 80 MB ({available:.1f} MB)')
+    if cpu is not None:
+        if cpu >= 95:
+            fail = True; reasons.append(f'average system CPU reached {cpu:.1f}%')
+        elif cpu >= 80:
+            warn = True; reasons.append(f'average system CPU is high ({cpu:.1f}%)')
+    if misses >= 15:
+        fail = True; reasons.append(f'worker deadline misses reached {misses:.1f}%')
+    elif misses >= 5:
+        warn = True; reasons.append(f'worker deadline misses reached {misses:.1f}%')
+    if web_p95 >= 400:
+        fail = True; reasons.append(f'web stream p95 work took {web_p95:.1f} ms')
+    elif web_p95 >= 200:
+        warn = True; reasons.append(f'web stream p95 work took {web_p95:.1f} ms')
+    if growth >= 100:
+        fail = True; reasons.append(f'benchmark RSS grew by {growth:.1f} MB')
+    elif growth >= 50:
+        warn = True; reasons.append(f'benchmark RSS grew by {growth:.1f} MB')
+    if throttled and throttled != 'throttled=0x0':
+        warn = True; reasons.append(f'Pi reported power/thermal flags: {throttled}')
+
+    if fail:
+        return 'FAIL', reasons
+    if warn:
+        return 'WARN', reasons
+    return 'PASS', ['CPU, RAM, worker scheduling and web-stream workload stayed inside benchmark targets']
+
+
+def run_benchmark(seconds: int = 120, stress: float = 1.0, reserve_mb: int = 48, web_clients: int = 5, output: str | None = None) -> dict:
+    seconds = max(10, int(seconds))
+    stress = max(0.25, float(stress))
+    reserve_mb = max(0, int(reserve_mb))
+    web_clients = max(0, int(web_clients))
+    libraries = _load_project_libraries()
+
+    with tempfile.TemporaryDirectory(prefix='car-telemetry-benchmark-') as temp_dir:
+        workload = SyntheticWorkload(stress, reserve_mb, web_clients, Path(temp_dir) / 'status.json')
+        mem_before = _meminfo(); rss_before = _proc_rss_mb(); temp_before = _temperature_c(); throttle_before = _throttled()
+        process_cpu_before = time.process_time(); wall_before = time.perf_counter()
+        workload.allocate_reserve(); threads = workload.start()
+        rss_peak = _proc_rss_mb(); available_samples=[]; cpu_samples=[]; temp_samples=[]; previous_cpu=_cpu_snapshot()
+
+        print('Car Telemetry Headless Web Full-Load Benchmark')
+        print('=' * 68)
+        print(f'Duration: {seconds}s | Stress: {stress:.2f}x | RAM reserve: {reserve_mb} MB | Web clients: {web_clients}')
+        print('Simulating GPS + 20 Hz IMU + python-OBD callbacks + DTC/VIN state + MQTT +')
+        print('           status writes + OLED + local web/API/WebSocket clients')
+        print('Press Ctrl+C to stop early.\n')
+
+        started=time.monotonic(); next_report=started; interrupted=False
+        try:
+            while time.monotonic()-started < seconds:
+                time.sleep(1); rss_peak=max(rss_peak,_proc_rss_mb()); mem=_meminfo()
+                if 'MemAvailable' in mem: available_samples.append(mem['MemAvailable'])
+                current=_cpu_snapshot(); cpu_value=_cpu_percent(previous_cpu,current); previous_cpu=current
+                if cpu_value is not None: cpu_samples.append(cpu_value)
+                temp=_temperature_c()
+                if temp is not None: temp_samples.append(temp)
+                now=time.monotonic()
+                if now>=next_report:
+                    elapsed=min(seconds,int(now-started)); avail=mem.get('MemAvailable'); avail_text=f'{avail:.0f} MB' if avail is not None else 'n/a'; cpu_text=f'{cpu_value:.0f}%' if cpu_value is not None else 'n/a'
+                    temp_text=f' | temp {temp:.1f}C' if temp is not None else ''
+                    print(f'[{elapsed:>4}/{seconds}s] RSS {_proc_rss_mb():6.1f} MB | available {avail_text:>8} | CPU {cpu_text:>4}{temp_text}')
+                    next_report=now+10
+        except KeyboardInterrupt:
+            interrupted=True; print('\nBenchmark interrupted; producing partial results.')
+        finally:
+            workload.stop.set()
+            for thread in threads: thread.join(timeout=2)
+
+        wall_elapsed=max(0.001,time.perf_counter()-wall_before); process_cpu_elapsed=time.process_time()-process_cpu_before
+        rss_end=_proc_rss_mb(); mem_end=_meminfo(); temp_end=_temperature_c(); throttle_end=_throttled()
+        report={
+            'benchmark':'car-telemetry-headless-web-full-load', 'interrupted':interrupted,
+            'durationSeconds':round(wall_elapsed,3),'stressMultiplier':stress,'ramReserveMb':reserve_mb,'webClients':web_clients,'libraries':libraries,
+            'metrics':{
+                'systemMemTotalMb':round(mem_end.get('MemTotal',mem_before.get('MemTotal',0.0)),1) if (mem_end or mem_before) else None,
+                'systemAvailableStartMb':round(mem_before.get('MemAvailable',0.0),1) if 'MemAvailable' in mem_before else None,
+                'minSystemAvailableMb':round(min(available_samples),1) if available_samples else None,
+                'systemAvailableEndMb':round(mem_end.get('MemAvailable',0.0),1) if 'MemAvailable' in mem_end else None,
+                'processRssStartMb':round(rss_before,1),'processRssPeakMb':round(rss_peak,1),'processRssEndMb':round(rss_end,1),'processRssGrowthMb':round(max(0.0,rss_end-rss_before),1),
+                'processCpuOneCoreEquivalentPercent':round(process_cpu_elapsed*100.0/wall_elapsed,1),
+                'averageSystemCpuPercent':round(statistics.fmean(cpu_samples),1) if cpu_samples else None,'peakSystemCpuPercent':round(max(cpu_samples),1) if cpu_samples else None,
+                'temperatureStartC':round(temp_before,1) if temp_before is not None else None,'temperaturePeakC':round(max(temp_samples),1) if temp_samples else temp_end,'temperatureEndC':round(temp_end,1) if temp_end is not None else None,
+                'throttledStart':throttle_before,'throttledEnd':throttle_end,'loadAverage':list(os.getloadavg()) if hasattr(os,'getloadavg') else None,'cpuCount':os.cpu_count(),
+            },
+            'workers':{name:stats.summary() for name,stats in workload.stats.items()},
+        }
+        grade,reasons=_grade(report); report['result']=grade; report['reasons']=reasons
+        if output:
+            path=Path(output).expanduser(); path.parent.mkdir(parents=True,exist_ok=True); path.write_text(json.dumps(report,indent=2),encoding='utf-8'); report['outputFile']=str(path)
+
+        print('\n'+'='*68); print(f'RESULT: {grade}')
+        for reason in reasons: print(' -',reason)
+        metrics=report['metrics']; print(f"Peak benchmark RSS: {metrics['processRssPeakMb']} MB")
+        if metrics['minSystemAvailableMb'] is not None: print(f"Minimum system available RAM: {metrics['minSystemAvailableMb']} MB")
+        if metrics['averageSystemCpuPercent'] is not None: print(f"Average system CPU: {metrics['averageSystemCpuPercent']}%")
+        print(f"Web stream p95 work: {report['workers'].get('web-stream',{}).get('p95WorkMs',0)} ms")
+        print(f"Worst worker deadline-miss rate: {max((w['deadlineMissPercent'] for w in report['workers'].values()),default=0):.2f}%")
+        if output: print(f'JSON report: {Path(output).expanduser()}')
+        print('='*68)
+        return report
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser=argparse.ArgumentParser(description='Simulate the complete headless telemetry + LAN web workload.')
+    parser.add_argument('--seconds',type=int,default=120)
+    parser.add_argument('--stress',type=float,default=1.0)
+    parser.add_argument('--reserve-mb',type=int,default=48)
+    parser.add_argument('--web-clients',type=int,default=5)
+    parser.add_argument('--output',default='benchmark-report.json')
+    args=parser.parse_args(argv)
+    report=run_benchmark(args.seconds,args.stress,args.reserve_mb,args.web_clients,args.output or None)
+    return 0 if report['result'] in {'PASS','WARN'} else 1
+
+
+if __name__=='__main__':
+    raise SystemExit(main())
+```
+
+## `src/car_telemetry/bluetooth.py`
+
+```python
+from __future__ import annotations
+
+import re
+import subprocess
+import time
+from typing import Any
+
+import pexpect
+
+from .common import run
+
+MAC_RE = re.compile(r"^(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
+
+
+def validate_mac(mac: str) -> str:
+    value = mac.strip().upper()
+    if not MAC_RE.fullmatch(value):
+        raise ValueError("Bluetooth MAC must look like AA:BB:CC:DD:EE:FF")
+    return value
+
+
+def power_on() -> None:
+    subprocess.run(["rfkill", "unblock", "bluetooth"], check=False, capture_output=True)
+    subprocess.run(["bluetoothctl", "power", "on"], check=False, capture_output=True)
+
+
+def controller_status() -> dict[str, Any]:
+    code, out, err = run(["bluetoothctl", "show"], 5)
+    if code != 0:
+        return {"available": False, "powered": False, "error": err or out or "bluetoothctl failed"}
+    return {
+        "available": True,
+        "powered": "Powered: yes" in out,
+        "discoverable": "Discoverable: yes" in out,
+        "pairable": "Pairable: yes" in out,
+        "raw": out,
+    }
+
+
+def _device_info(mac: str, fallback_name: str = "") -> dict[str, Any]:
+    mac = validate_mac(mac)
+    _, out, _ = run(["bluetoothctl", "info", mac], 5)
+    result: dict[str, Any] = {
+        "mac": mac,
+        "name": fallback_name or mac,
+        "paired": False,
+        "trusted": False,
+        "connected": False,
+        "blocked": False,
+    }
+    for raw in out.splitlines():
+        line = raw.strip()
+        if line.startswith("Name:"):
+            result["name"] = line.split(":", 1)[1].strip()
+        elif line.startswith("Alias:") and result["name"] == mac:
+            result["name"] = line.split(":", 1)[1].strip()
+        elif line.startswith("Paired:"):
+            result["paired"] = line.endswith("yes")
+        elif line.startswith("Trusted:"):
+            result["trusted"] = line.endswith("yes")
+        elif line.startswith("Connected:"):
+            result["connected"] = line.endswith("yes")
+        elif line.startswith("Blocked:"):
+            result["blocked"] = line.endswith("yes")
+        elif line.startswith("RSSI:"):
+            try:
+                result["rssi"] = int(line.split(":", 1)[1].strip())
+            except ValueError:
+                pass
+    return result
+
+
+def devices() -> list[dict[str, Any]]:
+    _, out, _ = run(["bluetoothctl", "devices"], 5)
+    found: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for line in out.splitlines():
+        match = re.match(r"Device\s+((?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})\s*(.*)", line.strip())
+        if not match:
+            continue
+        mac = match.group(1).upper()
+        if mac in seen:
+            continue
+        seen.add(mac)
+        found.append(_device_info(mac, match.group(2).strip()))
+    found.sort(key=lambda item: (not item.get("connected", False), not item.get("paired", False), item.get("name", "")))
+    return found
+
+
+def scan(seconds: int = 10) -> list[dict[str, Any]]:
+    power_on()
+    seconds = max(3, min(int(seconds), 30))
+    subprocess.run(
+        ["timeout", str(seconds), "bluetoothctl", "scan", "on"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    subprocess.run(["bluetoothctl", "scan", "off"], capture_output=True, check=False)
+    return devices()
+
+
+def pair(mac: str, pin: str | None = None) -> dict[str, Any]:
+    mac = validate_mac(mac)
+    power_on()
+
+    child = pexpect.spawn("bluetoothctl", encoding="utf-8", timeout=20)
+    try:
+        child.expect([r"\[.*\]#", r"# "])
+        child.sendline("agent KeyboardDisplay")
+        child.expect([r"Agent registered", r"Agent is already registered", r"\[.*\]#", r"# "])
+        child.sendline("default-agent")
+        time.sleep(0.3)
+        child.sendline(f"pair {mac}")
+
+        deadline = time.monotonic() + 35
+        success = False
+        while time.monotonic() < deadline:
+            index = child.expect(
+                [
+                    r"Enter PIN code:",
+                    r"Enter passkey.*:",
+                    r"Confirm passkey.*\(yes/no\):",
+                    r"Pairing successful",
+                    r"AlreadyExists",
+                    r"Failed to pair:.*",
+                    r"AuthenticationFailed",
+                    pexpect.TIMEOUT,
+                ],
+                timeout=5,
+            )
+            if index in (0, 1):
+                if not pin:
+                    raise RuntimeError("The device requested a PIN. Enter its PIN in the web app and try again.")
+                child.sendline(pin)
+            elif index == 2:
+                child.sendline("yes")
+            elif index in (3, 4):
+                success = True
+                break
+            elif index in (5, 6):
+                raise RuntimeError("Bluetooth pairing failed")
+            elif index == 7:
+                info = _device_info(mac)
+                if info.get("paired"):
+                    success = True
+                    break
+
+        if not success and not _device_info(mac).get("paired"):
+            raise RuntimeError("Bluetooth pairing did not complete")
+
+        child.sendline(f"trust {mac}")
+        time.sleep(0.5)
+        child.sendline(f"connect {mac}")
+        time.sleep(1.0)
+    finally:
+        try:
+            child.sendline("quit")
+            child.close(force=True)
+        except Exception:
+            pass
+
+    return _device_info(mac)
+
+
+def disconnect(mac: str) -> dict[str, Any]:
+    mac = validate_mac(mac)
+    run(["bluetoothctl", "disconnect", mac], 10)
+    return _device_info(mac)
+
+
+def forget(mac: str) -> dict[str, Any]:
+    mac = validate_mac(mac)
+    code, out, err = run(["bluetoothctl", "remove", mac], 10)
+    return {"ok": code == 0, "mac": mac, "message": out or err}
+
+
+def discover_channel(mac: str) -> int | None:
+    mac = validate_mac(mac)
+    _, out, err = run(["sdptool", "browse", mac], 20)
+    if not out and err:
+        raise RuntimeError(err)
+
+    blocks = re.split(r"\n\s*\n", out)
+    for block in blocks:
+        if "ELM327" in block.upper() and "RFCOMM" in block:
+            match = re.search(r"Channel:\s*(\d+)", block)
+            if match:
+                return int(match.group(1))
+    for block in blocks:
+        if '"Serial Port"' in block and "RFCOMM" in block:
+            match = re.search(r"Channel:\s*(\d+)", block)
+            if match:
+                return int(match.group(1))
+    return None
+
+
+def bind(mac: str, channel: int) -> None:
+    mac = validate_mac(mac)
+    subprocess.run(
+        ["sudo", "rfcomm", "release", "rfcomm0"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    subprocess.run(["sudo", "rfcomm", "bind", "rfcomm0", mac, str(int(channel))], check=True)
+```
+
+## `src/car_telemetry/cli.py`
+
+```python
+from __future__ import annotations
+
+import argparse
+import json
+import socket
+import subprocess
+
+from .bluetooth import bind, discover_channel
+from .common import read_json
+from .config import settings
+from .engine_client import EngineAPI
+from .obd_transport import resolve, usb_candidates
+
+
+def all_python_obd_commands():
+    import obd
+
+    seen = set()
+    rows = []
+    for mode_number, mode in enumerate(obd.commands.modes):
+        for command in mode:
+            if command is None or command.name in seen:
+                continue
+            seen.add(command.name)
+            raw = (
+                command.command.decode('ascii', errors='ignore')
+                if isinstance(command.command, (bytes, bytearray))
+                else str(command.command)
+            )
+            rows.append(
+                {
+                    'mode': mode_number,
+                    'name': command.name,
+                    'command': raw,
+                    'description': command.desc,
+                }
+            )
+    for name in ('ELM_VERSION', 'ELM_VOLTAGE'):
+        command = obd.commands[name]
+        raw = (
+            command.command.decode('ascii', errors='ignore')
+            if isinstance(command.command, (bytes, bytearray))
+            else str(command.command)
+        )
+        rows.append(
+            {
+                'mode': 'adapter',
+                'name': command.name,
+                'command': raw,
+                'description': command.desc,
+            }
+        )
+    return rows
+
+
+def main():
+    parser = argparse.ArgumentParser(prog='telemetry')
+    sub = parser.add_subparsers(dest='cmd', required=True)
+
+    sub.add_parser('status')
+    sub.add_parser('web-url')
+    sub.add_parser('obd-ports')
+    sub.add_parser('obd-catalog')
+    sub.add_parser('vin')
+
+    discover = sub.add_parser('obd-discover-bt')
+    discover.add_argument('--mac', required=True)
+
+    bind_parser = sub.add_parser('obd-bind-bt')
+    bind_parser.add_argument('--mac', required=True)
+    bind_parser.add_argument('--channel', type=int, required=True)
+
+    sub.add_parser('obd-reconnect')
+
+    transport = sub.add_parser('obd-transport')
+    transport.add_argument('transport', choices=['auto', 'usb', 'bluetooth'])
+
+    sub.add_parser('dtc-refresh')
+    clear = sub.add_parser('dtc-clear')
+    clear.add_argument('--confirm', action='store_true')
+
+    bt_scan = sub.add_parser('bluetooth-scan')
+    bt_scan.add_argument('--seconds', type=int, default=10)
+
+    bt_pair = sub.add_parser('bluetooth-pair')
+    bt_pair.add_argument('--mac', required=True)
+    bt_pair.add_argument('--pin', default='')
+
+    bt_use = sub.add_parser('bluetooth-use-elm')
+    bt_use.add_argument('--mac', required=True)
+    bt_use.add_argument('--channel', type=int)
+
+    bench = sub.add_parser('benchmark')
+    bench.add_argument('--seconds', type=int, default=120)
+    bench.add_argument('--stress', type=float, default=1.0)
+    bench.add_argument('--reserve-mb', type=int, default=48)
+    bench.add_argument('--web-clients', type=int, default=5)
+    bench.add_argument('--output', default='benchmark-report.json')
+
+    logs = sub.add_parser('logs')
+    logs.add_argument('-f', '--follow', action='store_true')
+    logs.add_argument('-n', '--lines', type=int, default=100)
+
+    args = parser.parse_args()
+    s = settings()
+    api = EngineAPI(s.api_host, s.api_port)
+
+    if args.cmd == 'status':
+        print(json.dumps(read_json(s.status_file) or {}, indent=2))
+        return 0
+
+    if args.cmd == 'web-url':
+        host = socket.gethostname()
+        print(f'http://{host}.local:{s.web_port}')
+        state = read_json(s.status_file) or {}
+        ip = state.get('system', {}).get('ipAddress')
+        if ip:
+            print(f'http://{ip}:{s.web_port}')
+        return 0
+
+    if args.cmd == 'obd-ports':
+        print('USB:')
+        for port in usb_candidates():
+            print(' ', port)
+        print('Bluetooth:', s.obd_bluetooth_port)
+        try:
+            print('Selected:', resolve(s))
+        except Exception as exc:
+            print('Selected: none -', exc)
+        return 0
+
+    if args.cmd == 'obd-catalog':
+        for row in all_python_obd_commands():
+            print(f"{str(row['mode']):>7}  {row['command']:<6}  {row['name']:<32} {row['description']}")
+        return 0
+
+    if args.cmd == 'vin':
+        state = read_json(s.status_file) or {}
+        print(state.get('obd', {}).get('vehicle', {}).get('VIN') or 'VIN not available')
+        return 0
+
+    if args.cmd == 'obd-discover-bt':
+        print(discover_channel(args.mac))
+        return 0
+
+    if args.cmd == 'obd-bind-bt':
+        bind(args.mac, args.channel)
+        return 0
+
+    if args.cmd == 'obd-reconnect':
+        print(api.post('/obd/reconnect'))
+        return 0
+
+    if args.cmd == 'obd-transport':
+        print(api.post('/obd/transport', {'transport': args.transport}))
+        return 0
+
+    if args.cmd == 'dtc-refresh':
+        print(json.dumps(api.post('/dtc/refresh'), indent=2))
+        return 0
+
+    if args.cmd == 'dtc-clear':
+        if not args.confirm:
+            print('Refusing. Re-run with --confirm and make sure the engine is OFF.')
+            return 2
+        print(api.post('/dtc/clear', {'confirm': 'CLEAR_DTC_CONFIRMED'}))
+        return 0
+
+    if args.cmd == 'bluetooth-scan':
+        print(json.dumps(api.post('/bluetooth/scan', {'seconds': args.seconds}), indent=2))
+        return 0
+
+    if args.cmd == 'bluetooth-pair':
+        print(json.dumps(api.post('/bluetooth/pair', {'mac': args.mac, 'pin': args.pin}), indent=2))
+        return 0
+
+    if args.cmd == 'bluetooth-use-elm':
+        payload = {'mac': args.mac}
+        if args.channel is not None:
+            payload['channel'] = args.channel
+        print(json.dumps(api.post('/bluetooth/use-elm', payload), indent=2))
+        return 0
+
+    if args.cmd == 'benchmark':
+        from .benchmark import run_benchmark
+
+        report = run_benchmark(
+            args.seconds,
+            args.stress,
+            args.reserve_mb,
+            args.web_clients,
+            args.output or None,
+        )
+        return 0 if report['result'] in {'PASS', 'WARN'} else 1
+
+    if args.cmd == 'logs':
+        command = ['journalctl', '-u', 'car-telemetry.service', '-n', str(args.lines), '--no-pager']
+        if args.follow:
+            command.append('-f')
+        return subprocess.call(command)
+
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
+```
+
+## `src/car_telemetry/common.py`
+
+```python
+from __future__ import annotations
+import json, subprocess
+from pathlib import Path
+from dataclasses import dataclass
+from typing import Sequence
+
+@dataclass
+class Check:
+    name: str
+    state: str
+    detail: str
+    @property
+    def failed(self) -> bool:
+        return self.state == "FAIL"
+
+def run(command: Sequence[str], timeout: float = 10) -> tuple[int,str,str]:
+    try:
+        c=subprocess.run(list(command), capture_output=True, text=True, timeout=timeout, check=False)
+        return c.returncode,c.stdout.strip(),c.stderr.strip()
+    except FileNotFoundError:
+        return 127,"",f"{command[0]} is not installed"
+    except subprocess.TimeoutExpired:
+        return 124,"","command timed out"
+
+def write_json_atomic(path: str, data: dict) -> None:
+    p=Path(path).expanduser(); p.parent.mkdir(parents=True,exist_ok=True)
+    t=p.with_suffix('.tmp'); t.write_text(json.dumps(data,indent=2,default=str),encoding='utf-8'); t.replace(p)
+
+def read_json(path: str):
+    p=Path(path).expanduser()
+    if not p.exists(): return None
+    try: return json.loads(p.read_text(encoding='utf-8'))
+    except Exception: return None
+
+def print_check(c: Check):
+    prefix={"OK":"[ OK ]","WARN":"[WARN]","FAIL":"[FAIL]","SKIP":"[SKIP]"}.get(c.state,"[????]")
+    print(f"{prefix} {c.name}: {c.detail}")
+```
+
+## `src/car_telemetry/config.py`
+
+```python
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+
+def _bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _int_auto(value: str) -> int:
+    return int(value, 0)
+
+
+def env_candidates(explicit: str | None = None) -> list[Path]:
+    paths: list[Path] = []
+    if explicit:
+        paths.append(Path(explicit).expanduser())
+    override = os.getenv("TELEMETRY_ENV")
+    if override:
+        paths.append(Path(override).expanduser())
+    paths.extend(
+        [
+            Path.cwd() / "config" / "telemetry.env",
+            Path.home() / "car-telemetry" / "config" / "telemetry.env",
+            Path("/etc/car-telemetry/telemetry.env"),
+        ]
+    )
+    return paths
+
+
+def find_env(explicit: str | None = None) -> Path | None:
+    return next((path for path in env_candidates(explicit) if path.exists()), None)
+
+
+def load_env(explicit: str | None = None) -> Path | None:
+    path = find_env(explicit)
+    if path is None:
+        return None
+
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+    return path
+
+
+def set_env_values(values: dict[str, str], explicit: str | None = None) -> Path:
+    path = find_env(explicit)
+    if path is None:
+        raise FileNotFoundError(
+            "telemetry.env was not found. Run ./scripts/install.sh before changing persistent settings."
+        )
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    remaining = {str(k): str(v) for k, v in values.items()}
+    output: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            key = stripped.split("=", 1)[0].strip()
+            if key in remaining:
+                output.append(f"{key}={remaining.pop(key)}")
+                continue
+        output.append(line)
+
+    if remaining:
+        output.append("")
+        output.append("# Updated by car-telemetry")
+        for key, value in remaining.items():
+            output.append(f"{key}={value}")
+
+    path.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
+    for key, value in values.items():
+        os.environ[str(key)] = str(value)
+    return path
+
+
+@dataclass(frozen=True)
+class Settings:
+    device_id: str
+    vehicle_id: str
+    prototype_stage: int
+
+    gps_enabled: bool
+    gps_port: str
+    gps_baud: int
+
+    imu_enabled: bool
+    imu_address: int
+    imu_rate_hz: float
+    imu_calibration_samples: int
+    harsh_accel_mps2: float
+    harsh_brake_mps2: float
+    harsh_corner_mps2: float
+    impact_g: float
+
+    oled_enabled: bool
+    oled_address: int
+    oled_width: int
+    oled_height: int
+
+    obd_enabled: bool
+    obd_transport: str
+    obd_usb_port: str
+    obd_bluetooth_port: str
+    obd_mac: str
+    obd_rfcomm_channel: int
+    obd_baud: int | None
+    obd_protocol: str | None
+    obd_fast: bool
+    obd_timeout: float
+    obd_async_loop_delay: float
+    obd_reconnect_seconds: float
+    obd_core_signals: tuple[str, ...]
+
+    dtc_scan_seconds: float
+    dtc_max_events: int
+    dtc_clear_require_engine_off: bool
+    vehicle_profile_dir: str
+
+    api_host: str
+    api_port: int
+
+    web_enabled: bool
+    web_host: str
+    web_port: int
+    web_state_refresh_seconds: float
+    bluetooth_scan_seconds: int
+
+    mqtt_enabled: bool
+    mqtt_host: str
+    mqtt_port: int
+    mqtt_topic: str
+    mqtt_dtc_topic: str
+    mqtt_metadata_topic: str
+    mqtt_username: str
+    mqtt_password: str
+    mqtt_tls: bool
+    mqtt_ca_cert: str
+    mqtt_client_cert: str
+    mqtt_client_key: str
+    mqtt_publish_seconds: float
+
+    status_file: str
+
+
+def settings(explicit: str | None = None) -> Settings:
+    load_env(explicit)
+
+    baud_raw = os.getenv("OBD_BAUD", "auto").strip().lower()
+    baud = None if baud_raw == "auto" else int(baud_raw)
+
+    protocol_raw = os.getenv("OBD_PROTOCOL", "auto").strip()
+    protocol = None if protocol_raw.lower() == "auto" else protocol_raw
+
+    core = tuple(
+        item.strip().upper()
+        for item in os.getenv(
+            "OBD_CORE_SIGNALS",
+            "RPM,SPEED,COOLANT_TEMP,ENGINE_LOAD,THROTTLE_POS,CONTROL_MODULE_VOLTAGE,FUEL_LEVEL,INTAKE_TEMP,MAF",
+        ).split(",")
+        if item.strip()
+    )
+
+    vehicle_id = os.getenv("VEHICLE_ID", "VEH-001")
+
+    return Settings(
+        device_id=os.getenv("DEVICE_ID", "PROTO-001"),
+        vehicle_id=vehicle_id,
+        prototype_stage=int(os.getenv("PROTOTYPE_STAGE", "1")),
+        gps_enabled=_bool("GPS_ENABLED", True),
+        gps_port=os.getenv("GPS_PORT", "/dev/serial0"),
+        gps_baud=int(os.getenv("GPS_BAUD", "9600")),
+        imu_enabled=_bool("IMU_ENABLED", True),
+        imu_address=_int_auto(os.getenv("IMU_ADDRESS", "0x68")),
+        imu_rate_hz=float(os.getenv("IMU_RATE_HZ", "20")),
+        imu_calibration_samples=int(os.getenv("IMU_CALIBRATION_SAMPLES", "150")),
+        harsh_accel_mps2=float(os.getenv("HARSH_ACCEL_MPS2", "3.0")),
+        harsh_brake_mps2=float(os.getenv("HARSH_BRAKE_MPS2", "-3.0")),
+        harsh_corner_mps2=float(os.getenv("HARSH_CORNER_MPS2", "3.5")),
+        impact_g=float(os.getenv("IMPACT_G", "2.5")),
+        oled_enabled=_bool("OLED_ENABLED", True),
+        oled_address=_int_auto(os.getenv("OLED_ADDRESS", "0x3C")),
+        oled_width=int(os.getenv("OLED_WIDTH", "128")),
+        oled_height=int(os.getenv("OLED_HEIGHT", "64")),
+        obd_enabled=_bool("OBD_ENABLED", True),
+        obd_transport=os.getenv("OBD_TRANSPORT", "auto").strip().lower(),
+        obd_usb_port=os.getenv("OBD_USB_PORT", "auto").strip(),
+        obd_bluetooth_port=os.getenv("OBD_BLUETOOTH_PORT", "/dev/rfcomm0").strip(),
+        obd_mac=os.getenv("OBD_MAC", "").strip().upper(),
+        obd_rfcomm_channel=int(os.getenv("OBD_RFCOMM_CHANNEL", "1")),
+        obd_baud=baud,
+        obd_protocol=protocol,
+        obd_fast=_bool("OBD_FAST", True),
+        obd_timeout=float(os.getenv("OBD_TIMEOUT", "0.2")),
+        obd_async_loop_delay=float(os.getenv("OBD_ASYNC_LOOP_DELAY", "0.10")),
+        obd_reconnect_seconds=float(os.getenv("OBD_RECONNECT_SECONDS", "4")),
+        obd_core_signals=core,
+        dtc_scan_seconds=float(os.getenv("DTC_SCAN_SECONDS", "60")),
+        dtc_max_events=int(os.getenv("DTC_MAX_EVENTS", "100")),
+        dtc_clear_require_engine_off=_bool("DTC_CLEAR_REQUIRE_ENGINE_OFF", True),
+        vehicle_profile_dir=os.path.expanduser(
+            os.getenv("VEHICLE_PROFILE_DIR", "~/.local/share/car-telemetry/vehicles")
+        ),
+        api_host=os.getenv("API_HOST", "127.0.0.1"),
+        api_port=int(os.getenv("API_PORT", "8765")),
+        web_enabled=_bool("WEB_ENABLED", True),
+        web_host=os.getenv("WEB_HOST", "0.0.0.0"),
+        web_port=int(os.getenv("WEB_PORT", "8080")),
+        web_state_refresh_seconds=float(os.getenv("WEB_STATE_REFRESH_SECONDS", "0.5")),
+        bluetooth_scan_seconds=int(os.getenv("BLUETOOTH_SCAN_SECONDS", "10")),
+        mqtt_enabled=_bool("MQTT_ENABLED", False),
+        mqtt_host=os.getenv("MQTT_HOST", "").strip(),
+        mqtt_port=int(os.getenv("MQTT_PORT", "1883")),
+        mqtt_topic=os.getenv("MQTT_TOPIC", f"vehicles/{vehicle_id}/telemetry"),
+        mqtt_dtc_topic=os.getenv("MQTT_DTC_TOPIC", f"vehicles/{vehicle_id}/dtc"),
+        mqtt_metadata_topic=os.getenv("MQTT_METADATA_TOPIC", f"vehicles/{vehicle_id}/metadata"),
+        mqtt_username=os.getenv("MQTT_USERNAME", ""),
+        mqtt_password=os.getenv("MQTT_PASSWORD", ""),
+        mqtt_tls=_bool("MQTT_TLS", False),
+        mqtt_ca_cert=os.path.expanduser(os.getenv("MQTT_CA_CERT", "")),
+        mqtt_client_cert=os.path.expanduser(os.getenv("MQTT_CLIENT_CERT", "")),
+        mqtt_client_key=os.path.expanduser(os.getenv("MQTT_CLIENT_KEY", "")),
+        mqtt_publish_seconds=float(os.getenv("MQTT_PUBLISH_SECONDS", "2")),
+        status_file=os.path.expanduser(
+            os.getenv("STATUS_FILE", "~/.local/state/car-telemetry/status.json")
+        ),
+    )
+```
+
+## `src/car_telemetry/engine.py`
+
+```python
+from __future__ import annotations
+
+import signal
+import threading
+
+from .api_server import APIServer
+from .common import write_json_atomic
+from .config import settings
+from .gps import worker as gps_worker
+from .imu import worker as imu_worker
+from .mqtt_client import worker as mqtt_worker
+from .obd_service import OBDService
+from .oled import worker as oled_worker
+from .state import DeviceState
+from .system_monitor import worker as system_worker
+
+
+def run_engine(s=None):
+    s = s or settings()
+    stop = threading.Event()
+    state = DeviceState(s.device_id, s.vehicle_id, s.prototype_stage)
+    obd = OBDService(s, state)
+
+    def shutdown(*_args):
+        state.set('agent', 'shutting-down')
+        stop.set()
+
+    signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT, shutdown)
+
+    workers = [
+        threading.Thread(target=gps_worker, args=(s, state, stop), daemon=True, name='gps'),
+        threading.Thread(target=imu_worker, args=(s, state, stop), daemon=True, name='imu'),
+        threading.Thread(target=oled_worker, args=(s, state, stop), daemon=True, name='oled'),
+        threading.Thread(target=mqtt_worker, args=(s, state, stop), daemon=True, name='mqtt'),
+        threading.Thread(target=obd.run, args=(stop,), daemon=True, name='obd'),
+        threading.Thread(target=system_worker, args=(state, stop), daemon=True, name='system'),
+        threading.Thread(
+            target=APIServer(s, state, obd, stop).run,
+            daemon=True,
+            name='internal-api',
+        ),
+    ]
+
+    for thread in workers:
+        thread.start()
+
+    state.set('agent', 'running')
+
+    try:
+        while not stop.is_set():
+            write_json_atomic(s.status_file, state.snapshot())
+            stop.wait(1.0)
+    finally:
+        stop.set()
+        obd.reconnect()
+        for thread in workers:
+            thread.join(timeout=2)
+        state.set('agent', 'stopped')
+        write_json_atomic(s.status_file, state.snapshot())
+
+    return 0
+
+
+def main():
+    raise SystemExit(run_engine())
+```
+
+## `src/car_telemetry/engine_client.py`
+
+```python
+from __future__ import annotations
+
+import json
+from urllib import error, request
+
+
+class EngineAPI:
+    def __init__(self, host: str, port: int):
+        self.base = f"http://{host}:{port}"
+
+    def get(self, path: str):
+        try:
+            with request.urlopen(self.base + path, timeout=30) as response:
+                return json.loads(response.read().decode('utf-8'))
+        except error.HTTPError as exc:
+            payload = exc.read().decode('utf-8', errors='replace')
+            try:
+                detail = json.loads(payload)
+            except Exception:
+                detail = {'error': payload or str(exc)}
+            raise RuntimeError(detail.get('error') or str(exc)) from exc
+        except Exception as exc:
+            raise RuntimeError(f"Telemetry engine API unavailable: {exc}") from exc
+
+    def post(self, path: str, payload: dict | None = None):
+        raw = json.dumps(payload or {}).encode('utf-8')
+        req = request.Request(
+            self.base + path,
+            data=raw,
+            headers={'Content-Type': 'application/json'},
+            method='POST',
+        )
+        try:
+            with request.urlopen(req, timeout=45) as response:
+                return json.loads(response.read().decode('utf-8'))
+        except error.HTTPError as exc:
+            body = exc.read().decode('utf-8', errors='replace')
+            try:
+                detail = json.loads(body)
+            except Exception:
+                detail = {'error': body or str(exc)}
+            raise RuntimeError(detail.get('error') or str(exc)) from exc
+        except Exception as exc:
+            raise RuntimeError(f"Telemetry engine API unavailable: {exc}") from exc
+```
+
+## `src/car_telemetry/gps.py`
+
+```python
+from __future__ import annotations
+import threading,time,serial,pynmea2
+from .config import Settings
+from .state import DeviceState
+
+def parse(line):
+    try: m=pynmea2.parse(line)
+    except Exception: return {}
+    out={}
+    if isinstance(m,pynmea2.types.talker.RMC):
+        valid=getattr(m,'status','')=='A'; out['validFix']=valid
+        if valid:
+            out['latitude']=float(m.latitude); out['longitude']=float(m.longitude)
+            if getattr(m,'spd_over_grnd',None) not in (None,''): out['speedKph']=round(float(m.spd_over_grnd)*1.852,2)
+            if getattr(m,'true_course',None) not in (None,''): out['headingDegrees']=round(float(m.true_course),2)
+    elif isinstance(m,pynmea2.types.talker.GGA):
+        q=int(getattr(m,'gps_qual',0) or 0); out['validFix']=q>0
+        if q>0: out['latitude']=float(m.latitude); out['longitude']=float(m.longitude)
+        if getattr(m,'num_sats',None) not in (None,''): out['satellites']=int(m.num_sats)
+        if getattr(m,'altitude',None) not in (None,''): out['altitudeMeters']=round(float(m.altitude),2)
+        if getattr(m,'horizontal_dil',None) not in (None,''): out['hdop']=round(float(m.horizontal_dil),2)
+    return out
+
+def worker(s:Settings,state:DeviceState,stop:threading.Event):
+    state.merge('gps',{'enabled':s.gps_enabled,'port':s.gps_port,'baud':s.gps_baud})
+    if not s.gps_enabled:return
+    while not stop.is_set():
+        try:
+            with serial.Serial(s.gps_port,s.gps_baud,timeout=1) as port:
+                state.merge('gps',{'serialOpen':True,'error':None})
+                while not stop.is_set():
+                    raw=port.readline()
+                    if not raw:continue
+                    line=raw.decode('ascii',errors='ignore').strip()
+                    if not line.startswith('$'):continue
+                    state.merge('gps',{'received':True,'lastDataUnix':time.time(),**parse(line)})
+        except Exception as e:
+            state.merge('gps',{'serialOpen':False,'error':str(e)}); stop.wait(3)
+```
+
+## `src/car_telemetry/imu.py`
+
+```python
+from __future__ import annotations
+import math,threading,time
+from .config import Settings
+from .state import DeviceState
+
+def open_sensor(s):
+    import board,adafruit_mpu6050
+    return adafruit_mpu6050.MPU6050(board.I2C(),address=s.imu_address)
+
+def worker(s:Settings,state:DeviceState,stop:threading.Event):
+    state.merge('imu',{'enabled':s.imu_enabled,'address':f'0x{s.imu_address:02X}'})
+    if not s.imu_enabled:return
+    try:
+        sensor=open_sensor(s); sums=[0.0]*6
+        state.merge('imu',{'calibrating':True,'calibrationPercent':0})
+        for i in range(s.imu_calibration_samples):
+            a=sensor.acceleration; g=sensor.gyro; vals=(*a,*g)
+            sums=[x+y for x,y in zip(sums,vals)]
+            if i%10==0 or i==s.imu_calibration_samples-1: state.merge('imu',{'calibrationPercent':int((i+1)*100/s.imu_calibration_samples)})
+            time.sleep(.02)
+        off=[x/s.imu_calibration_samples for x in sums]
+        state.merge('imu',{'calibrating':False,'calibrated':True,'error':None})
+    except Exception as e:
+        state.merge('imu',{'calibrating':False,'calibrated':False,'error':str(e)}); return
+    interval=1/max(s.imu_rate_hz,1)
+    while not stop.is_set():
+        try:
+            ax,ay,az=sensor.acceleration; gx,gy,gz=sensor.gyro
+            lx,ly,lz=ax-off[0],ay-off[1],az-off[2]; rg=math.sqrt(ax*ax+ay*ay+az*az)/9.80665
+            state.merge('imu',{'linearAccelerationMps2':{'x':round(lx,3),'y':round(ly,3),'z':round(lz,3)},
+              'gyroRadPerSec':{'x':round(gx-off[3],3),'y':round(gy-off[4],3),'z':round(gz-off[5],3)},'resultantG':round(rg,3),'temperatureC':round(float(sensor.temperature),2),'error':None})
+            state.merge('events',{'harshAcceleration':lx>=s.harsh_accel_mps2,'harshBraking':lx<=s.harsh_brake_mps2,
+              'harshCornering':abs(ly)>=s.harsh_corner_mps2,'possibleImpact':rg>=s.impact_g})
+        except Exception as e: state.merge('imu',{'error':str(e)})
+        stop.wait(interval)
+```
+
+## `src/car_telemetry/mqtt_client.py`
+
+```python
+from __future__ import annotations
+
+import hashlib
+import json
+import ssl
+import threading
+import time
+from datetime import datetime, timezone
+
+import paho.mqtt.client as mqtt
+
+from .config import Settings
+from .state import DeviceState
+
+
+def _telemetry_obd(obd_state: dict) -> dict:
+    return {
+        'connected': obd_state.get('connected', False),
+        'connecting': obd_state.get('connecting', False),
+        'transport': obd_state.get('transport'),
+        'port': obd_state.get('port'),
+        'protocolId': obd_state.get('protocolId'),
+        'protocolName': obd_state.get('protocolName'),
+        'vehicleProfileKey': obd_state.get('vehicleProfileKey'),
+        'coreSignals': obd_state.get('coreSignals', []),
+        'selectedSignals': obd_state.get('selectedSignals', []),
+        'signals': obd_state.get('signals', {}),
+        'dtc': obd_state.get('dtc', {}),
+        'error': obd_state.get('error'),
+    }
+
+
+def _metadata_payload(settings: Settings, snapshot: dict) -> dict:
+    obd_state = snapshot.get('obd', {})
+    vehicle = obd_state.get('vehicle', {})
+    return {
+        'messageType': 'VEHICLE_METADATA',
+        'deviceId': settings.device_id,
+        'vehicleId': settings.vehicle_id,
+        'vehicleProfileKey': obd_state.get('vehicleProfileKey'),
+        'timestamp': datetime.now(timezone.utc).isoformat(),
+        'vehicle': vehicle,
+        'transport': obd_state.get('transport'),
+        'protocolId': obd_state.get('protocolId'),
+        'protocolName': obd_state.get('protocolName'),
+        'supportedSignals': [item.get('name') for item in obd_state.get('supportedSignals', [])],
+        'coreSignals': obd_state.get('coreSignals', []),
+        'selectedSignals': obd_state.get('selectedSignals', []),
+    }
+
+
+def worker(settings: Settings, state: DeviceState, stop: threading.Event):
+    state.merge(
+        'mqtt',
+        {
+            'enabled': settings.mqtt_enabled,
+            'connected': False,
+            'topic': settings.mqtt_topic,
+            'dtcTopic': settings.mqtt_dtc_topic,
+            'metadataTopic': settings.mqtt_metadata_topic,
+        },
+    )
+    if not settings.mqtt_enabled or not settings.mqtt_host:
+        return
+
+    client = mqtt.Client(
+        callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+        client_id=settings.device_id,
+        protocol=mqtt.MQTTv311,
+    )
+    if settings.mqtt_username:
+        client.username_pw_set(settings.mqtt_username, settings.mqtt_password)
+    if settings.mqtt_tls:
+        client.tls_set(
+            ca_certs=settings.mqtt_ca_cert or None,
+            certfile=settings.mqtt_client_cert or None,
+            keyfile=settings.mqtt_client_key or None,
+            cert_reqs=ssl.CERT_REQUIRED,
+        )
+
+    def on_connect(_client, _userdata, _flags, reason_code, _properties):
+        state.merge('mqtt', {'connected': int(reason_code) == 0, 'connectReason': str(reason_code)})
+
+    def on_disconnect(_client, _userdata, _flags, reason_code, _properties):
+        state.merge('mqtt', {'connected': False, 'disconnectReason': str(reason_code)})
+
+    client.on_connect = on_connect
+    client.on_disconnect = on_disconnect
+    client.reconnect_delay_set(1, 30)
+    client.connect_async(settings.mqtt_host, settings.mqtt_port, 60)
+    client.loop_start()
+
+    last_dtc_seq = 0
+    last_metadata_hash = ''
+
+    try:
+        while not stop.is_set():
+            snapshot = state.snapshot()
+            obd_state = snapshot.get('obd', {})
+
+            payload = {
+                'messageType': 'TELEMETRY',
+                'deviceId': settings.device_id,
+                'vehicleId': settings.vehicle_id,
+                'vehicleProfileKey': obd_state.get('vehicleProfileKey'),
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'gps': snapshot.get('gps', {}),
+                'imu': snapshot.get('imu', {}),
+                'obd': _telemetry_obd(obd_state),
+                'events': snapshot.get('events', {}),
+                'system': snapshot.get('system', {}),
+            }
+
+            if snapshot.get('mqtt', {}).get('connected'):
+                info = client.publish(
+                    settings.mqtt_topic,
+                    json.dumps(payload, separators=(',', ':'), default=str),
+                    qos=1,
+                )
+
+                metadata = _metadata_payload(settings, snapshot)
+                metadata_json = json.dumps(metadata, sort_keys=True, separators=(',', ':'), default=str)
+                metadata_hash = hashlib.sha256(metadata_json.encode('utf-8')).hexdigest()
+                if metadata_hash != last_metadata_hash and obd_state.get('connected'):
+                    client.publish(settings.mqtt_metadata_topic, metadata_json, qos=1, retain=True)
+                    last_metadata_hash = metadata_hash
+
+                for event in obd_state.get('dtcEvents', []):
+                    try:
+                        seq = int(event.get('seq', 0))
+                    except Exception:
+                        seq = 0
+                    if seq > last_dtc_seq:
+                        dtc_payload = {
+                            'messageType': 'DTC_EVENT',
+                            'deviceId': settings.device_id,
+                            'vehicleId': settings.vehicle_id,
+                            **event,
+                        }
+                        client.publish(
+                            settings.mqtt_dtc_topic,
+                            json.dumps(dtc_payload, separators=(',', ':'), default=str),
+                            qos=1,
+                        )
+                        last_dtc_seq = max(last_dtc_seq, seq)
+
+                state.merge(
+                    'mqtt',
+                    {
+                        'lastPublishOk': info.rc == mqtt.MQTT_ERR_SUCCESS,
+                        'lastPublishAt': time.time(),
+                        'lastDtcEventSeqPublished': last_dtc_seq,
+                    },
+                )
+
+            stop.wait(settings.mqtt_publish_seconds)
+    finally:
+        client.loop_stop()
+        client.disconnect()
+```
+
+## `src/car_telemetry/obd_service.py`
+
+```python
+from __future__ import annotations
+
+import threading
+import time
+from collections import deque
+from datetime import datetime, timezone
+from typing import Any
+
+import obd
+
+from .config import Settings
+from .obd_transport import resolve
+from .state import DeviceState
+from .vehicle_profiles import ProfileStore
+
+CORE_FALLBACK = (
+    "RPM",
+    "SPEED",
+    "COOLANT_TEMP",
+    "ENGINE_LOAD",
+    "THROTTLE_POS",
+    "CONTROL_MODULE_VOLTAGE",
+    "FUEL_LEVEL",
+    "INTAKE_TEMP",
+    "MAF",
+)
+EXCLUDED_LIVE_PREFIXES = ("PIDS_", "MIDS_", "DTC_")
+EXCLUDED_LIVE = {
+    "STATUS",
+    "FREEZE_DTC",
+    "O2_SENSORS",
+    "O2_SENSORS_ALT",
+    "GET_DTC",
+    "CLEAR_DTC",
+    "GET_CURRENT_DTC",
+    "VIN",
+    "VIN_MESSAGE_COUNT",
+    "CALIBRATION_ID",
+    "CALIBRATION_ID_MESSAGE_COUNT",
+    "CVN",
+    "CVN_MESSAGE_COUNT",
+    "ELM_VERSION",
+    "ELM_VOLTAGE",
+}
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def serializable(value: Any) -> Any:
+    if value is None:
+        return None
+    if hasattr(value, "magnitude") and hasattr(value, "units"):
+        magnitude = value.magnitude
+        try:
+            magnitude = float(magnitude)
+        except Exception:
+            magnitude = str(magnitude)
+        return {"value": magnitude, "unit": str(value.units)}
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, tuple):
+        return [serializable(item) for item in value]
+    if isinstance(value, list):
+        return [serializable(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): serializable(item) for key, item in value.items()}
+    return str(value)
+
+
+def command_meta(command) -> dict[str, Any]:
+    raw = (
+        command.command.decode("ascii", errors="ignore")
+        if isinstance(command.command, (bytes, bytearray))
+        else str(command.command)
+    )
+    mode = None
+    if len(raw) >= 2 and raw[:2].isdigit():
+        try:
+            mode = int(raw[:2])
+        except ValueError:
+            pass
+    return {
+        "name": command.name,
+        "description": command.desc,
+        "command": raw,
+        "mode": mode,
+    }
+
+
+def is_live_candidate(command) -> bool:
+    if command.name in EXCLUDED_LIVE or command.name.startswith(EXCLUDED_LIVE_PREFIXES):
+        return False
+    raw = (
+        command.command.decode("ascii", errors="ignore")
+        if isinstance(command.command, (bytes, bytearray))
+        else str(command.command)
+    )
+    return raw.startswith("01")
+
+
+def _normalize_vin(value: Any) -> str | None:
+    if isinstance(value, str):
+        vin = value.strip().replace(" ", "")
+        return vin or None
+    if isinstance(value, list):
+        joined = "".join(str(item) for item in value).strip().replace(" ", "")
+        return joined or None
+    return None
+
+
+def _normalize_dtc_list(value: Any) -> list[dict[str, str]]:
+    if not value:
+        return []
+    if isinstance(value, tuple) and len(value) >= 1 and isinstance(value[0], str):
+        value = [value]
+    result: list[dict[str, str]] = []
+    if not isinstance(value, (list, tuple)):
+        return result
+    for item in value:
+        if isinstance(item, (list, tuple)) and item:
+            code = str(item[0]).strip()
+            description = str(item[1]).strip() if len(item) > 1 and item[1] is not None else ""
+            if code:
+                result.append({"code": code, "description": description})
+        elif isinstance(item, str) and item.strip():
+            result.append({"code": item.strip(), "description": ""})
+    return result
+
+
+def _normalize_freeze_dtc(value: Any) -> dict[str, str] | None:
+    items = _normalize_dtc_list(value)
+    return items[0] if items else None
+
+
+class OBDService:
+    def __init__(self, settings: Settings, state: DeviceState):
+        self.s = settings
+        self.state = state
+        self.lock = threading.RLock()
+        self.connection = None
+        self.transport_override: str | None = None
+        self.store = ProfileStore(settings.vehicle_profile_dir)
+        self.vehicle_key = settings.vehicle_id
+        self.profile = self.store.load(self.vehicle_key)
+        self.user_selected = set(self.profile.get("selectedSignals", []))
+        self.dtc_events: deque[dict[str, Any]] = deque(maxlen=max(10, settings.dtc_max_events))
+        self.dtc_event_seq = 0
+        self._last_dtc_sets: dict[str, set[str]] = {"stored": set(), "currentCycle": set()}
+
+    def set_transport(self, kind: str) -> None:
+        if kind not in {"auto", "usb", "bluetooth"}:
+            raise ValueError("transport must be auto, usb, or bluetooth")
+        self.transport_override = kind
+        self.reconnect()
+
+    def reconnect(self) -> None:
+        with self.lock:
+            if self.connection:
+                try:
+                    self.connection.stop()
+                except Exception:
+                    pass
+                try:
+                    self.connection.close()
+                except Exception:
+                    pass
+            self.connection = None
+
+    def _query(self, connection, command, *, force: bool = False):
+        response = obd.OBD.query(connection, command, force=force)
+        if response is None or response.is_null():
+            return None
+        return response.value
+
+    def _query_static(self, connection) -> dict[str, Any]:
+        metadata: dict[str, Any] = {}
+
+        for name in ("ELM_VERSION", "ELM_VOLTAGE"):
+            try:
+                value = self._query(connection, obd.commands[name], force=True)
+                if value is not None:
+                    metadata[name] = serializable(value)
+            except Exception:
+                pass
+
+        for name in ("OBD_COMPLIANCE", "FUEL_TYPE"):
+            try:
+                command = obd.commands[name]
+                if connection.supports(command):
+                    value = self._query(connection, command, force=False)
+                    if value is not None:
+                        metadata[name] = serializable(value)
+            except Exception:
+                pass
+
+        # VIN is Mode 09. Try it once on connection even when the adapter's support
+        # discovery is incomplete; failure is harmless and VIN remains optional.
+        try:
+            value = self._query(connection, obd.commands.VIN, force=True)
+            vin = _normalize_vin(value)
+            if vin:
+                metadata["VIN"] = vin
+        except Exception:
+            vin = None
+
+        for name in ("CALIBRATION_ID", "CVN"):
+            try:
+                command = obd.commands[name]
+                if connection.supports(command):
+                    value = self._query(connection, command, force=False)
+                    if value is not None:
+                        metadata[name] = serializable(value)
+            except Exception:
+                pass
+
+        vin = metadata.get("VIN")
+        if isinstance(vin, str) and vin.strip():
+            self.vehicle_key = vin.strip()
+            self.profile = self.store.load(self.vehicle_key)
+            self.user_selected = set(self.profile.get("selectedSignals", []))
+
+        metadata.update(
+            {
+                "vehicleKey": self.vehicle_key,
+                "protocolId": connection.protocol_id(),
+                "protocolName": connection.protocol_name(),
+                "port": connection.port_name(),
+                "discoveredAt": utc_now(),
+            }
+        )
+        return metadata
+
+    def _callback(self, name: str, meta: dict[str, Any]):
+        def callback(response):
+            try:
+                value = None if response.is_null() else serializable(response.value)
+                self.state.merge_nested(
+                    "obd",
+                    "signals",
+                    {
+                        name: {
+                            **meta,
+                            "value": value,
+                            "updatedAt": time.time(),
+                        }
+                    },
+                )
+            except Exception as exc:
+                self.state.merge("obd", {"lastCallbackError": str(exc)})
+
+        return callback
+
+    def _configure_watches(self, connection) -> None:
+        supported = {
+            command.name: command
+            for command in connection.supported_commands
+            if command is not None
+        }
+
+        live_meta = [command_meta(command) for command in supported.values() if is_live_candidate(command)]
+        live_meta.sort(key=lambda item: item["name"])
+
+        core = [
+            name
+            for name in (self.s.obd_core_signals or CORE_FALLBACK)
+            if name in supported and is_live_candidate(supported[name])
+        ]
+        extras = [
+            name
+            for name in sorted(self.user_selected)
+            if name in supported and is_live_candidate(supported[name])
+        ]
+        selected: list[str] = []
+        for name in core + extras:
+            if name not in selected:
+                selected.append(name)
+
+        with connection.paused():
+            connection.unwatch_all()
+            for name in selected:
+                command = supported[name]
+                connection.watch(command, callback=self._callback(name, command_meta(command)))
+
+        all_supported = [command_meta(command) for command in supported.values()]
+        all_supported.sort(key=lambda item: (item.get("mode") is None, item.get("mode") or 0, item["name"]))
+
+        self.profile.update(
+            {
+                "vehicleKey": self.vehicle_key,
+                "selectedSignals": sorted(self.user_selected),
+                "supportedSignals": sorted(item["name"] for item in live_meta),
+                "updatedAt": utc_now(),
+            }
+        )
+        self.store.save(self.vehicle_key, self.profile)
+
+        self.state.merge(
+            "obd",
+            {
+                "supportedSignals": live_meta,
+                "supportedCommandsAll": all_supported,
+                "coreSignals": core,
+                "selectedSignals": selected,
+                "userSelectedSignals": extras,
+                "supportedCount": len(live_meta),
+                "supportedCommandCount": len(all_supported),
+            },
+        )
+
+    def select_signal(self, name: str, selected: bool = True) -> None:
+        name = name.upper().strip()
+        with self.lock:
+            if not self.connection:
+                raise RuntimeError("OBD is not connected")
+            supported = {
+                item["name"]
+                for item in self.state.snapshot().get("obd", {}).get("supportedSignals", [])
+            }
+            if name not in supported:
+                raise ValueError(f"{name} is not a supported live signal")
+            if name in self.s.obd_core_signals and not selected:
+                raise ValueError("Core signals cannot be removed")
+            if selected:
+                self.user_selected.add(name)
+            else:
+                self.user_selected.discard(name)
+            self.profile.update(
+                {
+                    "vehicleKey": self.vehicle_key,
+                    "selectedSignals": sorted(self.user_selected),
+                    "supportedSignals": sorted(supported),
+                    "updatedAt": utc_now(),
+                }
+            )
+            self.store.save(self.vehicle_key, self.profile)
+            self._configure_watches(self.connection)
+
+    def _append_dtc_event(self, event: str, scope: str, code: str = "", description: str = "", **extra) -> dict[str, Any]:
+        self.dtc_event_seq += 1
+        item = {
+            "seq": self.dtc_event_seq,
+            "timestamp": utc_now(),
+            "event": event,
+            "scope": scope,
+            "code": code,
+            "description": description,
+            "vehicleKey": self.vehicle_key,
+            **extra,
+        }
+        self.dtc_events.append(item)
+        return item
+
+    def _detect_dtc_changes(self, scope: str, current: list[dict[str, str]]) -> None:
+        previous_codes = self._last_dtc_sets.get(scope, set())
+        current_by_code = {item["code"]: item for item in current}
+        current_codes = set(current_by_code)
+
+        for code in sorted(current_codes - previous_codes):
+            item = current_by_code[code]
+            self._append_dtc_event("DTC_ADDED", scope, code, item.get("description", ""))
+        for code in sorted(previous_codes - current_codes):
+            self._append_dtc_event("DTC_REMOVED", scope, code)
+
+        self._last_dtc_sets[scope] = current_codes
+
+    def refresh_dtcs(self) -> dict[str, Any]:
+        with self.lock:
+            if not self.connection:
+                raise RuntimeError("OBD is not connected")
+
+            stored: list[dict[str, str]] = []
+            current: list[dict[str, str]] = []
+            freeze: dict[str, str] | None = None
+            errors: dict[str, str] = {}
+
+            with self.connection.paused():
+                for name, target in (("GET_DTC", "stored"), ("GET_CURRENT_DTC", "current")):
+                    try:
+                        value = self._query(self.connection, obd.commands[name], force=True)
+                        normalized = _normalize_dtc_list(value)
+                        if target == "stored":
+                            stored = normalized
+                        else:
+                            current = normalized
+                    except Exception as exc:
+                        errors[name] = str(exc)
+
+                try:
+                    command = obd.commands.FREEZE_DTC
+                    value = self._query(
+                        self.connection,
+                        command,
+                        force=not self.connection.supports(command),
+                    )
+                    freeze = _normalize_freeze_dtc(value)
+                except Exception as exc:
+                    errors["FREEZE_DTC"] = str(exc)
+
+            self._detect_dtc_changes("stored", stored)
+            self._detect_dtc_changes("currentCycle", current)
+
+            result = {
+                "stored": stored,
+                "currentCycle": current,
+                "freezeFrameCode": freeze,
+                "storedCount": len(stored),
+                "currentCycleCount": len(current),
+                "lastScanAt": utc_now(),
+                "errors": errors,
+            }
+            self.state.merge(
+                "obd",
+                {
+                    "dtc": result,
+                    "dtcEvents": list(self.dtc_events),
+                    "lastDtcEventSeq": self.dtc_event_seq,
+                },
+            )
+            return result
+
+    def _rpm_value(self) -> float | None:
+        rpm = (
+            self.state.snapshot()
+            .get("obd", {})
+            .get("signals", {})
+            .get("RPM", {})
+            .get("value")
+        )
+        if isinstance(rpm, dict):
+            rpm = rpm.get("value")
+        try:
+            return float(rpm) if rpm is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def clear_dtcs(self, confirmation: str) -> Any:
+        if confirmation != "CLEAR_DTC_CONFIRMED":
+            raise PermissionError("confirmation token missing")
+
+        rpm = self._rpm_value()
+        if self.s.dtc_clear_require_engine_off:
+            if rpm is None:
+                raise RuntimeError("Cannot verify that the engine is off because RPM is unavailable")
+            if rpm > 0:
+                raise RuntimeError("Engine appears to be running. Stop the engine before clearing DTCs")
+
+        with self.lock:
+            if not self.connection:
+                raise RuntimeError("OBD is not connected")
+            try:
+                with self.connection.paused():
+                    value = self._query(self.connection, obd.commands.CLEAR_DTC, force=True)
+                self._append_dtc_event("DTC_CLEAR_REQUESTED", "all", result="success")
+                self.state.merge(
+                    "obd",
+                    {
+                        "lastDtcClearAt": utc_now(),
+                        "dtcEvents": list(self.dtc_events),
+                        "lastDtcEventSeq": self.dtc_event_seq,
+                    },
+                )
+                time.sleep(1.0)
+                self.refresh_dtcs()
+                return serializable(value)
+            except Exception as exc:
+                self._append_dtc_event("DTC_CLEAR_REQUESTED", "all", result="failed", error=str(exc))
+                self.state.merge(
+                    "obd",
+                    {
+                        "dtcEvents": list(self.dtc_events),
+                        "lastDtcEventSeq": self.dtc_event_seq,
+                    },
+                )
+                raise
+
+    def _connect_once(self) -> None:
+        transport = resolve(self.s, self.transport_override)
+        self.state.merge(
+            "obd",
+            {
+                "enabled": True,
+                "connecting": True,
+                "connected": False,
+                "transport": transport.kind,
+                "port": transport.port,
+                "error": None,
+            },
+        )
+
+        connection = obd.Async(
+            portstr=transport.port,
+            baudrate=self.s.obd_baud,
+            protocol=self.s.obd_protocol,
+            fast=self.s.obd_fast,
+            timeout=self.s.obd_timeout,
+            delay_cmds=self.s.obd_async_loop_delay,
+        )
+        if not connection.is_connected():
+            try:
+                connection.close()
+            except Exception:
+                pass
+            raise RuntimeError(f"python-OBD did not reach CAR_CONNECTED (status={connection.status()})")
+
+        self.connection = connection
+        vehicle = self._query_static(connection)
+        self.profile.update({"vehicleKey": self.vehicle_key, "vehicle": vehicle, "updatedAt": utc_now()})
+        self.store.save(self.vehicle_key, self.profile)
+        self._configure_watches(connection)
+
+        self.state.merge(
+            "obd",
+            {
+                "connecting": False,
+                "connected": True,
+                "status": str(connection.status()),
+                "protocolId": connection.protocol_id(),
+                "protocolName": connection.protocol_name(),
+                "port": connection.port_name(),
+                "transport": transport.kind,
+                "vehicle": vehicle,
+                "vehicleProfileKey": self.vehicle_key,
+            },
+        )
+        connection.start()
+
+    def run(self, stop_event: threading.Event) -> None:
+        if not self.s.obd_enabled:
+            self.state.merge("obd", {"enabled": False})
+            return
+
+        next_dtc_scan = 0.0
+        while not stop_event.is_set():
+            try:
+                if self.connection is None:
+                    self._connect_once()
+                    next_dtc_scan = 0.0
+
+                if self.connection and not self.connection.is_connected():
+                    raise RuntimeError("vehicle/ELM connection lost")
+
+                now = time.monotonic()
+                if self.connection and now >= next_dtc_scan:
+                    try:
+                        self.refresh_dtcs()
+                    except Exception as exc:
+                        self.state.merge("obd", {"dtcError": str(exc)})
+                    next_dtc_scan = now + max(10.0, self.s.dtc_scan_seconds)
+
+                stop_event.wait(1.0)
+            except Exception as exc:
+                self.state.merge(
+                    "obd",
+                    {
+                        "connecting": False,
+                        "connected": False,
+                        "error": str(exc),
+                    },
+                )
+                self.reconnect()
+                stop_event.wait(self.s.obd_reconnect_seconds)
+
+        self.reconnect()
+```
+
+## `src/car_telemetry/obd_transport.py`
+
+```python
+from __future__ import annotations
+from dataclasses import dataclass
+from pathlib import Path
+import glob
+from .config import Settings
+
+@dataclass(frozen=True)
+class Transport:
+    kind:str
+    port:str
+
+def usb_candidates():
+    result=[]
+    for p in sorted(glob.glob('/dev/serial/by-id/*'))+sorted(glob.glob('/dev/ttyUSB*'))+sorted(glob.glob('/dev/ttyACM*')):
+        if p not in result: result.append(p)
+    return result
+
+def resolve(s:Settings, override_kind=None):
+    mode=(override_kind or s.obd_transport).lower()
+    if mode not in {'auto','usb','bluetooth'}: raise ValueError('OBD_TRANSPORT must be auto, usb, or bluetooth')
+    usb=[]
+    if s.obd_usb_port!='auto':
+        if Path(s.obd_usb_port).exists(): usb=[s.obd_usb_port]
+    else: usb=usb_candidates()
+    bt=Path(s.obd_bluetooth_port).exists()
+    if mode in {'auto','usb'} and usb: return Transport('usb',usb[0])
+    if mode in {'auto','bluetooth'} and bt: return Transport('bluetooth',s.obd_bluetooth_port)
+    if mode=='usb': raise FileNotFoundError('No USB ELM327 serial port found')
+    if mode=='bluetooth': raise FileNotFoundError(f'{s.obd_bluetooth_port} not found')
+    raise FileNotFoundError('No USB or Bluetooth ELM327 transport found')
+```
+
+## `src/car_telemetry/oled.py`
+
+```python
+from __future__ import annotations
+import threading,time
+from PIL import Image,ImageDraw,ImageFont
+from .config import Settings
+from .state import DeviceState
+
+class OLED:
+    def __init__(self,s): self.s=s; self.display=None; self.lock=threading.RLock(); self.font=ImageFont.load_default()
+    def open(self):
+        if self.display:return self.display
+        import board,adafruit_ssd1306
+        self.display=adafruit_ssd1306.SSD1306_I2C(self.s.oled_width,self.s.oled_height,board.I2C(),addr=self.s.oled_address);return self.display
+    def show(self,*lines):
+        if not self.s.oled_enabled:return
+        with self.lock:
+            d=self.open(); img=Image.new('1',(self.s.oled_width,self.s.oled_height)); draw=ImageDraw.Draw(img); y=0
+            for line in lines[:6]: draw.text((0,y),str(line)[:21],font=self.font,fill=255);y+=10
+            d.image(img);d.show()
+
+def v(signal):
+    x=signal.get('value') if isinstance(signal,dict) else signal
+    if isinstance(x,dict): return x.get('value','--')
+    return '--' if x is None else x
+
+def worker(s:Settings,state:DeviceState,stop:threading.Event):
+    if not s.oled_enabled:return
+    oled=OLED(s)
+    while not stop.is_set():
+        try:
+            snap=state.snapshot();o=snap.get('obd',{});g=snap.get('gps',{});sig=o.get('signals',{})
+            oled.show('CAR TELEMETRY',f"SPD:{v(sig.get('SPEED',{}))}",f"RPM:{v(sig.get('RPM',{}))}",
+                      f"GPS:{'FIX' if g.get('validFix') else 'DATA' if g.get('received') else 'WAIT'}",f"OBD:{'OK' if o.get('connected') else 'WAIT'} {str(o.get('transport','')).upper()}")
+        except Exception: pass
+        stop.wait(1)
+```
+
+## `src/car_telemetry/state.py`
+
+```python
+from __future__ import annotations
+import copy, threading
+from datetime import datetime, timezone
+
+def now(): return datetime.now(timezone.utc).isoformat()
+
+class DeviceState:
+    def __init__(self, device_id, vehicle_id, stage):
+        self.lock=threading.RLock()
+        self.data={"agent":"starting","deviceId":device_id,"vehicleId":vehicle_id,"prototypeStage":stage,"startedAt":now(),
+                   "gps":{},"imu":{},"obd":{"signals":{},"supportedSignals":[],"selectedSignals":[]},"mqtt":{},"events":{},"system":{}}
+    def merge(self, section, values):
+        with self.lock:
+            current=self.data.setdefault(section,{})
+            if isinstance(current,dict): current.update(values)
+            else: self.data[section]=dict(values)
+            self.data['updatedAt']=now()
+    def merge_nested(self, section, key, values):
+        with self.lock:
+            target=self.data.setdefault(section,{}).setdefault(key,{})
+            target.update(values); self.data['updatedAt']=now()
+    def set(self,key,value):
+        with self.lock: self.data[key]=value; self.data['updatedAt']=now()
+    def snapshot(self):
+        with self.lock: return copy.deepcopy(self.data)
+```
+
+## `src/car_telemetry/system_monitor.py`
+
+```python
+from __future__ import annotations
+
+import os
+import shutil
+import socket
+import threading
+import time
+from pathlib import Path
+
+from .state import DeviceState
+
+
+def _meminfo() -> dict[str, float]:
+    result: dict[str, float] = {}
+    try:
+        for raw in Path('/proc/meminfo').read_text().splitlines():
+            key, rest = raw.split(':', 1)
+            result[key] = float(rest.strip().split()[0]) / 1024.0
+    except Exception:
+        pass
+    return result
+
+
+def _cpu_snapshot() -> tuple[int, int] | None:
+    try:
+        fields = [int(x) for x in Path('/proc/stat').read_text().splitlines()[0].split()[1:]]
+        idle = fields[3] + (fields[4] if len(fields) > 4 else 0)
+        return sum(fields), idle
+    except Exception:
+        return None
+
+
+def _cpu_percent(before, after) -> float | None:
+    if not before or not after:
+        return None
+    total = after[0] - before[0]
+    idle = after[1] - before[1]
+    if total <= 0:
+        return None
+    return round(max(0.0, min(100.0, (total - idle) * 100.0 / total)), 1)
+
+
+def _temperature() -> float | None:
+    for path in (Path('/sys/class/thermal/thermal_zone0/temp'), Path('/sys/devices/virtual/thermal/thermal_zone0/temp')):
+        try:
+            return round(float(path.read_text().strip()) / 1000.0, 1)
+        except Exception:
+            pass
+    return None
+
+
+def _ip_address() -> str | None:
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.connect(('8.8.8.8', 80))
+        ip = sock.getsockname()[0]
+        sock.close()
+        return ip
+    except Exception:
+        return None
+
+
+def worker(state: DeviceState, stop: threading.Event) -> None:
+    previous = _cpu_snapshot()
+    while not stop.is_set():
+        current = _cpu_snapshot()
+        mem = _meminfo()
+        disk = shutil.disk_usage('/')
+        payload = {
+            'hostname': socket.gethostname(),
+            'ipAddress': _ip_address(),
+            'cpuPercent': _cpu_percent(previous, current),
+            'cpuCount': os.cpu_count(),
+            'temperatureC': _temperature(),
+            'memoryTotalMb': round(mem.get('MemTotal', 0.0), 1) if mem else None,
+            'memoryAvailableMb': round(mem.get('MemAvailable', 0.0), 1) if mem else None,
+            'memoryUsedMb': round(mem.get('MemTotal', 0.0) - mem.get('MemAvailable', 0.0), 1) if mem else None,
+            'diskTotalGb': round(disk.total / (1024**3), 2),
+            'diskFreeGb': round(disk.free / (1024**3), 2),
+            'loadAverage': list(os.getloadavg()) if hasattr(os, 'getloadavg') else None,
+        }
+        try:
+            payload['uptimeSeconds'] = float(Path('/proc/uptime').read_text().split()[0])
+        except Exception:
+            pass
+        state.merge('system', payload)
+        previous = current
+        stop.wait(2.0)
+```
+
+## `src/car_telemetry/vehicle_profiles.py`
+
+```python
+from __future__ import annotations
+import json, re
+from pathlib import Path
+
+def safe_id(value): return re.sub(r'[^A-Za-z0-9_.-]+','_',value or 'unknown')[:80]
+
+class ProfileStore:
+    def __init__(self, root): self.root=Path(root).expanduser(); self.root.mkdir(parents=True,exist_ok=True)
+    def path(self, vehicle_key): return self.root/f'{safe_id(vehicle_key)}.json'
+    def load(self, vehicle_key):
+        p=self.path(vehicle_key)
+        if not p.exists(): return {"vehicleKey":vehicle_key,"selectedSignals":[]}
+        try: return json.loads(p.read_text(encoding='utf-8'))
+        except Exception: return {"vehicleKey":vehicle_key,"selectedSignals":[]}
+    def save(self, vehicle_key, profile):
+        p=self.path(vehicle_key); p.write_text(json.dumps(profile,indent=2),encoding='utf-8')
+```
+
+## `src/car_telemetry/web_app.py`
+
+```python
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+
+import uvicorn
+from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+
+from .common import read_json
+from .config import settings
+from .engine_client import EngineAPI
+
+S = settings()
+ENGINE = EngineAPI(S.api_host, S.api_port)
+STATIC_DIR = Path(__file__).with_name('web_static')
+
+app = FastAPI(title='Car Telemetry', docs_url=None, redoc_url=None)
+app.mount('/static', StaticFiles(directory=str(STATIC_DIR)), name='static')
+
+
+@app.get('/')
+def index():
+    return FileResponse(STATIC_DIR / 'index.html')
+
+
+@app.get('/api/state')
+def state():
+    return read_json(S.status_file) or {'agent': 'starting'}
+
+
+@app.get('/api/signals')
+def signals():
+    try:
+        return ENGINE.get('/signals')
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+
+
+@app.get('/api/vehicle')
+def vehicle():
+    try:
+        return ENGINE.get('/vehicle')
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+
+
+@app.get('/api/dtc')
+def dtc():
+    try:
+        return ENGINE.get('/dtc')
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+
+
+@app.get('/api/obd/ports')
+def obd_ports():
+    try:
+        return ENGINE.get('/obd/ports')
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+
+
+@app.get('/api/bluetooth/status')
+def bluetooth_status():
+    try:
+        return ENGINE.get('/bluetooth/status')
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+
+
+def proxy_post(path: str, payload: dict):
+    try:
+        return ENGINE.post(path, payload)
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc))
+
+
+@app.post('/api/signals/select')
+def signal_select(payload: dict = Body(default_factory=dict)):
+    return proxy_post('/signals/select', payload)
+
+
+@app.post('/api/obd/reconnect')
+def obd_reconnect(payload: dict = Body(default_factory=dict)):
+    return proxy_post('/obd/reconnect', payload)
+
+
+@app.post('/api/obd/transport')
+def obd_transport(payload: dict = Body(default_factory=dict)):
+    return proxy_post('/obd/transport', payload)
+
+
+@app.post('/api/dtc/refresh')
+def dtc_refresh(payload: dict = Body(default_factory=dict)):
+    return proxy_post('/dtc/refresh', payload)
+
+
+@app.post('/api/dtc/clear')
+def dtc_clear(payload: dict = Body(default_factory=dict)):
+    return proxy_post('/dtc/clear', payload)
+
+
+@app.post('/api/bluetooth/scan')
+def bluetooth_scan(payload: dict = Body(default_factory=dict)):
+    return proxy_post('/bluetooth/scan', payload)
+
+
+@app.post('/api/bluetooth/pair')
+def bluetooth_pair(payload: dict = Body(default_factory=dict)):
+    return proxy_post('/bluetooth/pair', payload)
+
+
+@app.post('/api/bluetooth/disconnect')
+def bluetooth_disconnect(payload: dict = Body(default_factory=dict)):
+    return proxy_post('/bluetooth/disconnect', payload)
+
+
+@app.post('/api/bluetooth/forget')
+def bluetooth_forget(payload: dict = Body(default_factory=dict)):
+    return proxy_post('/bluetooth/forget', payload)
+
+
+@app.post('/api/bluetooth/use-elm')
+def bluetooth_use_elm(payload: dict = Body(default_factory=dict)):
+    return proxy_post('/bluetooth/use-elm', payload)
+
+
+@app.websocket('/ws/telemetry')
+async def telemetry_socket(websocket: WebSocket):
+    await websocket.accept()
+    last_payload = None
+    try:
+        while True:
+            data = read_json(S.status_file) or {'agent': 'starting'}
+            payload = json.dumps(data, separators=(',', ':'), default=str)
+            if payload != last_payload:
+                await websocket.send_text(payload)
+                last_payload = payload
+            await asyncio.sleep(max(0.2, S.web_state_refresh_seconds))
+    except WebSocketDisconnect:
+        return
+
+
+def main():
+    if not S.web_enabled:
+        return
+    uvicorn.run(app, host=S.web_host, port=S.web_port, log_level='info')
+```
+
+## `src/car_telemetry/web_static/app.js`
+
+```javascript
+const $ = (id) => document.getElementById(id);
+let latest = {};
+let signalCatalog = [];
+
+function toast(message){const el=$('toast');el.textContent=message;el.classList.add('show');setTimeout(()=>el.classList.remove('show'),3000)}
+function valueOfSignal(name){const v=latest?.obd?.signals?.[name]?.value;if(v&&typeof v==='object'&&'value'in v)return v.value;return v??null}
+function displayValue(name,suffix=''){const v=valueOfSignal(name);return v===null||v===undefined?'--':`${typeof v==='number'?Math.round(v*10)/10:v}${suffix}`}
+function badge(id,ok,warn=false){const el=$(id);el.classList.toggle('ok',!!ok);el.classList.toggle('warn',!ok&&warn)}
+function fmtUptime(s){if(!s)return'--';const h=Math.floor(s/3600),m=Math.floor((s%3600)/60);return`${h}h ${m}m`}
+function escapeHtml(s){return String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
+
+function renderState(data){latest=data||{};const obd=data.obd||{},gps=data.gps||{},mqtt=data.mqtt||{},sys=data.system||{},vehicle=obd.vehicle||{},dtc=obd.dtc||{};
+$('speed').textContent=displayValue('SPEED');$('rpm').textContent=displayValue('RPM');$('coolant').textContent=displayValue('COOLANT_TEMP',' °C');$('load').textContent=displayValue('ENGINE_LOAD',' %');$('throttle').textContent=displayValue('THROTTLE_POS',' %');$('fuel').textContent=displayValue('FUEL_LEVEL',' %');$('voltage').textContent=displayValue('CONTROL_MODULE_VOLTAGE',' V');$('dtc-count').textContent=dtc.storedCount??0;
+$('vin').textContent=vehicle.VIN||'Not available';$('protocol').textContent=obd.protocolName||vehicle.protocolName||'--';$('transport').textContent=obd.transport||'--';$('gps-detail').textContent=gps.validFix?`${gps.latitude??'--'}, ${gps.longitude??'--'} · ${gps.satellites??'--'} sats`:gps.received?'Data, waiting for fix':'Waiting';
+$('vehicle-subtitle').textContent=vehicle.VIN?`VIN ${vehicle.VIN}`:(obd.connected?'Vehicle connected':'Waiting for vehicle…');badge('badge-gps',gps.validFix,gps.received);badge('badge-obd',obd.connected,obd.connecting);badge('badge-mqtt',mqtt.connected,mqtt.enabled);
+$('sys-cpu').textContent=sys.cpuPercent==null?'--':`${sys.cpuPercent}%`;$('sys-temp').textContent=sys.temperatureC==null?'--':`${sys.temperatureC} °C`;$('sys-ram').textContent=sys.memoryAvailableMb==null?'--':`${sys.memoryAvailableMb} MB`;$('sys-disk').textContent=sys.diskFreeGb==null?'--':`${sys.diskFreeGb} GB`;$('sys-host').textContent=sys.hostname||'--';$('sys-ip').textContent=sys.ipAddress||'--';$('sys-uptime').textContent=fmtUptime(sys.uptimeSeconds);$('sys-agent').textContent=data.agent||'--';renderDtc(dtc,obd.dtcEvents||[]);}
+
+function renderDtc(dtc,events){renderDtcList('stored-dtcs',dtc.stored||[]);renderDtcList('current-dtcs',dtc.currentCycle||[]);renderDtcList('freeze-dtc',dtc.freezeFrameCode?[dtc.freezeFrameCode]:[]);const recent=[...events].reverse().slice(0,15);const el=$('dtc-events');el.innerHTML=recent.length?recent.map(e=>`<div class="dtc-item"><b>${escapeHtml(e.event)} ${escapeHtml(e.code||'')}</b><small>${escapeHtml(e.scope||'')} · ${escapeHtml(e.timestamp||'')}</small></div>`).join(''):'<div class="empty">No DTC events yet.</div>'}
+function renderDtcList(id,items){const el=$(id);el.innerHTML=items.length?items.map(d=>`<div class="dtc-item"><b>${escapeHtml(d.code)}</b><small>${escapeHtml(d.description||'No description available')}</small></div>`).join(''):'<div class="empty">None</div>'}
+
+async function getJson(url){const r=await fetch(url);const j=await r.json();if(!r.ok)throw new Error(j.detail||j.error||r.statusText);return j}
+async function postJson(url,body={}){const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const j=await r.json();if(!r.ok)throw new Error(j.detail||j.error||r.statusText);return j}
+
+async function loadSignals(){try{const d=await getJson('/api/signals');signalCatalog=d.supported||[];renderSignals(d)}catch(e){toast(e.message)}}
+function renderSignals(data){const q=$('signal-search').value.trim().toLowerCase();const core=new Set(data.core||[]),selected=new Set(data.selected||[]);const rows=signalCatalog.filter(s=>!q||`${s.name} ${s.description}`.toLowerCase().includes(q));$('signal-list').innerHTML=rows.length?rows.map(s=>{const isCore=core.has(s.name),isSelected=selected.has(s.name);return`<div class="list-row"><div class="meta"><b>${escapeHtml(s.name)} ${isCore?'<small>CORE</small>':''}</b><small>${escapeHtml(s.description||'')}</small></div>${isCore?'<span class="small">Always on</span>':`<button data-signal="${escapeHtml(s.name)}" data-selected="${isSelected}">${isSelected?'Remove':'Add'}</button>`}</div>`}).join(''):'<div class="empty">No matching signals.</div>';
+$('signal-list').querySelectorAll('button[data-signal]').forEach(btn=>btn.onclick=async()=>{try{await postJson('/api/signals/select',{name:btn.dataset.signal,selected:btn.dataset.selected!=='true'});await loadSignals()}catch(e){toast(e.message)}})}
+
+async function loadSetup(){try{const [ports,bt]=await Promise.all([getJson('/api/obd/ports'),getJson('/api/bluetooth/status')]);$('port-info').textContent=`Mode: ${ports.mode}\nSelected: ${ports.selected?.kind||'none'} ${ports.selected?.port||''}\nUSB: ${(ports.usb||[]).join(', ')||'none'}\nBluetooth serial: ${ports.bluetoothPort}`;document.querySelectorAll('.transport-button').forEach(b=>b.classList.toggle('active',b.dataset.transport===ports.mode));renderBluetooth(bt)}catch(e){toast(e.message)}}
+function renderBluetooth(data){const c=data.controller||{};$('bluetooth-controller').textContent=c.available?`Controller: ${c.powered?'ON':'OFF'} · configured ELM: ${data.configuredElmMac||'none'}`:`Bluetooth unavailable: ${c.error||''}`;const list=data.devices||[];$('bluetooth-list').innerHTML=list.length?list.map(d=>`<div class="list-row"><div class="meta"><b>${escapeHtml(d.name||d.mac)}</b><small>${escapeHtml(d.mac)} · ${d.paired?'paired':'not paired'} · ${d.connected?'connected':'disconnected'}</small></div><div class="button-row">${d.paired?'':`<button data-action="pair" data-mac="${d.mac}">Pair</button>`}<button data-action="use" data-mac="${d.mac}">Use as ELM</button>${d.connected?`<button data-action="disconnect" data-mac="${d.mac}">Disconnect</button>`:''}${d.paired?`<button data-action="forget" data-mac="${d.mac}">Forget</button>`:''}</div></div>`).join(''):'<div class="empty">No Bluetooth devices discovered yet.</div>';
+$('bluetooth-list').querySelectorAll('button').forEach(btn=>btn.onclick=async()=>{const mac=btn.dataset.mac,action=btn.dataset.action;try{if(action==='pair'){const pin=prompt('Bluetooth PIN if required (for many ELM327 adapters: 1234 or 0000). Leave blank if none.')||'';await postJson('/api/bluetooth/pair',{mac,pin})}else if(action==='use'){await postJson('/api/bluetooth/use-elm',{mac})}else if(action==='disconnect'){await postJson('/api/bluetooth/disconnect',{mac})}else if(action==='forget'){if(!confirm(`Forget ${mac}?`))return;await postJson('/api/bluetooth/forget',{mac})}await loadSetup();toast('Bluetooth action completed')}catch(e){toast(e.message)}})}
+
+function initTabs(){document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{document.querySelectorAll('.tabs button').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');$(`tab-${b.dataset.tab}`).classList.add('active');if(b.dataset.tab==='signals')loadSignals();if(b.dataset.tab==='setup')loadSetup()})}
+function initActions(){$('signal-search').oninput=()=>loadSignals();$('refresh-dtc').onclick=async()=>{try{await postJson('/api/dtc/refresh');toast('DTC scan complete')}catch(e){toast(e.message)}};$('clear-dtc').onclick=async()=>{const typed=prompt('Engine must be OFF. Type CLEAR to clear diagnostic codes.');if(typed!=='CLEAR')return;try{await postJson('/api/dtc/clear',{confirm:'CLEAR_DTC_CONFIRMED'});toast('DTC clear command completed')}catch(e){toast(e.message)}};document.querySelectorAll('.transport-button').forEach(b=>b.onclick=async()=>{try{await postJson('/api/obd/transport',{transport:b.dataset.transport});await loadSetup();toast(`OBD transport set to ${b.dataset.transport}`)}catch(e){toast(e.message)}});$('reconnect-obd').onclick=async()=>{try{await postJson('/api/obd/reconnect');toast('OBD reconnect requested')}catch(e){toast(e.message)}};$('scan-bluetooth').onclick=async()=>{try{toast('Scanning Bluetooth…');const d=await postJson('/api/bluetooth/scan',{});renderBluetooth({controller:(await getJson('/api/bluetooth/status')).controller,devices:d.devices});toast('Bluetooth scan complete')}catch(e){toast(e.message)}}}
+
+function connectWs(){const proto=location.protocol==='https:'?'wss':'ws';const ws=new WebSocket(`${proto}://${location.host}/ws/telemetry`);ws.onmessage=e=>{try{renderState(JSON.parse(e.data))}catch{}};ws.onclose=()=>setTimeout(connectWs,1500);ws.onerror=()=>ws.close()}
+initTabs();initActions();getJson('/api/state').then(renderState).catch(()=>{});connectWs();
+```
+
+## `src/car_telemetry/web_static/index.html`
+
+```html
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Car Telemetry</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>Car Telemetry</h1>
+      <p id="vehicle-subtitle">Waiting for vehicle…</p>
+    </div>
+    <div class="status-row">
+      <span id="badge-gps" class="badge">GPS</span>
+      <span id="badge-obd" class="badge">OBD</span>
+      <span id="badge-mqtt" class="badge">Cloud</span>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button data-tab="dashboard" class="active">Dashboard</button>
+    <button data-tab="signals">Signals</button>
+    <button data-tab="diagnostics">Diagnostics</button>
+    <button data-tab="setup">Setup</button>
+    <button data-tab="system">System</button>
+  </nav>
+
+  <main>
+    <section id="tab-dashboard" class="tab active">
+      <div class="hero-grid">
+        <div class="card hero"><span>Speed</span><strong id="speed">--</strong><small>km/h</small></div>
+        <div class="card hero"><span>RPM</span><strong id="rpm">--</strong><small>rpm</small></div>
+      </div>
+      <div class="metric-grid">
+        <div class="card"><span>Coolant</span><strong id="coolant">--</strong></div>
+        <div class="card"><span>Engine Load</span><strong id="load">--</strong></div>
+        <div class="card"><span>Throttle</span><strong id="throttle">--</strong></div>
+        <div class="card"><span>Fuel</span><strong id="fuel">--</strong></div>
+        <div class="card"><span>Voltage</span><strong id="voltage">--</strong></div>
+        <div class="card"><span>DTCs</span><strong id="dtc-count">--</strong></div>
+      </div>
+      <div class="card details">
+        <h2>Vehicle</h2>
+        <dl>
+          <div><dt>VIN</dt><dd id="vin">--</dd></div>
+          <div><dt>Protocol</dt><dd id="protocol">--</dd></div>
+          <div><dt>OBD transport</dt><dd id="transport">--</dd></div>
+          <div><dt>GPS</dt><dd id="gps-detail">--</dd></div>
+        </dl>
+      </div>
+    </section>
+
+    <section id="tab-signals" class="tab">
+      <div class="section-head">
+        <div><h2>Vehicle Signals</h2><p>Select extra supported PIDs to add to telemetry.</p></div>
+        <input id="signal-search" type="search" placeholder="Search signals" />
+      </div>
+      <div id="signal-list" class="list"></div>
+    </section>
+
+    <section id="tab-diagnostics" class="tab">
+      <div class="section-head">
+        <div><h2>Diagnostics</h2><p>DTCs are also scanned automatically in the background.</p></div>
+        <button id="refresh-dtc">Scan now</button>
+      </div>
+      <div class="diagnostic-grid">
+        <div class="card"><h3>Stored DTCs</h3><div id="stored-dtcs" class="dtc-list"></div></div>
+        <div class="card"><h3>Current-cycle DTCs</h3><div id="current-dtcs" class="dtc-list"></div></div>
+        <div class="card"><h3>Freeze-frame code</h3><div id="freeze-dtc" class="dtc-list"></div></div>
+      </div>
+      <div class="card danger">
+        <h3>Clear diagnostic codes</h3>
+        <p>This can clear stored DTCs and freeze-frame information. The engine must be off.</p>
+        <button id="clear-dtc" class="danger-button">Clear DTCs</button>
+      </div>
+      <div class="card"><h3>Recent DTC events</h3><div id="dtc-events" class="dtc-list"></div></div>
+    </section>
+
+    <section id="tab-setup" class="tab">
+      <div class="card">
+        <h2>OBD Connection</h2>
+        <p>Auto mode prefers USB ELM327 and falls back to Bluetooth RFCOMM.</p>
+        <div class="button-row">
+          <button class="transport-button" data-transport="auto">Auto</button>
+          <button class="transport-button" data-transport="usb">USB</button>
+          <button class="transport-button" data-transport="bluetooth">Bluetooth</button>
+          <button id="reconnect-obd">Reconnect OBD</button>
+        </div>
+        <div id="port-info" class="mono small"></div>
+      </div>
+
+      <div class="card">
+        <div class="section-head">
+          <div><h2>Bluetooth</h2><p>Bluetooth pairing happens on the Raspberry Pi through BlueZ.</p></div>
+          <button id="scan-bluetooth">Scan</button>
+        </div>
+        <div id="bluetooth-controller" class="small"></div>
+        <div id="bluetooth-list" class="list"></div>
+      </div>
+    </section>
+
+    <section id="tab-system" class="tab">
+      <div class="metric-grid">
+        <div class="card"><span>CPU</span><strong id="sys-cpu">--</strong></div>
+        <div class="card"><span>Temperature</span><strong id="sys-temp">--</strong></div>
+        <div class="card"><span>RAM available</span><strong id="sys-ram">--</strong></div>
+        <div class="card"><span>Disk free</span><strong id="sys-disk">--</strong></div>
+      </div>
+      <div class="card details">
+        <h2>Device</h2>
+        <dl>
+          <div><dt>Hostname</dt><dd id="sys-host">--</dd></div>
+          <div><dt>IP address</dt><dd id="sys-ip">--</dd></div>
+          <div><dt>Uptime</dt><dd id="sys-uptime">--</dd></div>
+          <div><dt>Agent</dt><dd id="sys-agent">--</dd></div>
+        </dl>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
+```
+
+## `src/car_telemetry/web_static/styles.css`
+
+```css
+:root{font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#e8edf5;background:#0b0f14;color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#0b0f14;min-height:100vh}.topbar{display:flex;justify-content:space-between;gap:20px;align-items:center;padding:20px clamp(16px,4vw,44px);border-bottom:1px solid #27313d;background:#111821;position:sticky;top:0;z-index:3}.topbar h1{margin:0;font-size:1.45rem}.topbar p{margin:.25rem 0 0;color:#9aa8b8;font-size:.9rem}.status-row{display:flex;gap:8px;flex-wrap:wrap}.badge{border:1px solid #394757;border-radius:999px;padding:6px 10px;color:#9aa8b8;font-size:.8rem}.badge.ok{border-color:#1f8b58;color:#67e39d;background:#0e2b20}.badge.warn{border-color:#a06e1a;color:#ffd073;background:#30240f}.tabs{display:flex;gap:6px;overflow:auto;padding:10px clamp(12px,4vw,44px);background:#0e141c;border-bottom:1px solid #202a35;position:sticky;top:82px;z-index:2}.tabs button,.button-row button,.section-head button,.transport-button{border:1px solid #344253;background:#17212c;color:#dce5ef;border-radius:9px;padding:10px 14px;font-weight:600;cursor:pointer}.tabs button.active,.transport-button.active{background:#183a52;border-color:#3a96c5;color:#9bdcff}main{max-width:1120px;margin:auto;padding:22px clamp(14px,4vw,40px) 60px}.tab{display:none}.tab.active{display:block}.hero-grid,.metric-grid,.diagnostic-grid{display:grid;gap:12px}.hero-grid{grid-template-columns:repeat(2,minmax(0,1fr));margin-bottom:12px}.metric-grid{grid-template-columns:repeat(3,minmax(0,1fr));margin-bottom:12px}.diagnostic-grid{grid-template-columns:repeat(3,minmax(0,1fr));margin-bottom:12px}.card{background:#111821;border:1px solid #25303c;border-radius:14px;padding:16px;box-shadow:0 8px 30px #0003}.card span{display:block;color:#91a0b2;font-size:.8rem;text-transform:uppercase;letter-spacing:.06em}.card strong{display:block;font-size:1.7rem;margin-top:7px}.hero{min-height:150px;display:flex;flex-direction:column;justify-content:center;align-items:center}.hero strong{font-size:4rem;line-height:1}.hero small{color:#91a0b2;margin-top:4px}.card h2,.card h3{margin-top:0}.details dl{margin:0}.details dl div{display:grid;grid-template-columns:150px 1fr;gap:10px;padding:9px 0;border-bottom:1px solid #202a35}.details dl div:last-child{border-bottom:0}.details dt{color:#91a0b2}.details dd{margin:0;word-break:break-all}.section-head{display:flex;justify-content:space-between;gap:14px;align-items:center;margin-bottom:14px}.section-head h2{margin:0}.section-head p{margin:.25rem 0;color:#91a0b2}.section-head input{min-width:220px;max-width:360px;width:40%;background:#111821;border:1px solid #344253;color:#fff;border-radius:9px;padding:10px 12px}.list{display:grid;gap:8px}.list-row{display:flex;align-items:center;justify-content:space-between;gap:12px;background:#111821;border:1px solid #25303c;border-radius:12px;padding:12px 14px}.list-row .meta{min-width:0}.list-row .meta b{display:block}.list-row .meta small{display:block;color:#91a0b2;margin-top:3px}.list-row button{border:1px solid #37617b;background:#153348;color:#9bdcff;border-radius:8px;padding:8px 12px;cursor:pointer}.list-row button.remove{background:#302113;border-color:#7b572c;color:#ffd088}.dtc-list{display:grid;gap:8px}.dtc-item{background:#0d131a;border-left:3px solid #e3a53a;border-radius:8px;padding:9px 10px}.dtc-item b{display:block}.dtc-item small{color:#9aa8b8}.empty{color:#8392a4}.danger{border-color:#6b3030;margin:14px 0}.danger-button{border:1px solid #9e3d3d;background:#4b1e1e;color:#ffb5b5;border-radius:9px;padding:10px 14px;font-weight:700;cursor:pointer}.button-row{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;word-break:break-word}.small{font-size:.86rem;color:#9aa8b8}.toast{position:fixed;right:20px;bottom:20px;max-width:min(420px,calc(100vw - 40px));background:#17212c;border:1px solid #3a5066;color:#e8edf5;border-radius:10px;padding:12px 14px;opacity:0;transform:translateY(12px);pointer-events:none;transition:.2s}.toast.show{opacity:1;transform:translateY(0)}@media(max-width:760px){.topbar{align-items:flex-start;flex-direction:column}.tabs{top:121px}.metric-grid,.diagnostic-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.section-head{align-items:stretch;flex-direction:column}.section-head input{width:100%;max-width:none}.details dl div{grid-template-columns:110px 1fr}}@media(max-width:480px){.hero-grid{grid-template-columns:1fr 1fr}.hero{min-height:125px}.hero strong{font-size:2.8rem}.metric-grid,.diagnostic-grid{grid-template-columns:1fr 1fr}.card{padding:13px}.tabs button{padding:9px 11px}.topbar{padding:14px}.tabs{top:110px}}
+```
+
+## `systemd/car-telemetry-obd-link.service.template`
+
+```ini
+[Unit]
+Description=Vehicle Telemetry Bluetooth RFCOMM Link
+After=bluetooth.service
+Wants=bluetooth.service
+Before=car-telemetry.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=__PROJECT_DIR__/scripts/obd-link.sh __PROJECT_DIR__/config/telemetry.env
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+```
+
+## `systemd/car-telemetry-web.service.template`
+
+```ini
+[Unit]
+Description=Car Telemetry LAN Web App
+After=network-online.target car-telemetry.service
+Wants=network-online.target car-telemetry.service
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__PROJECT_DIR__
+Environment=PYTHONUNBUFFERED=1
+Environment=TELEMETRY_ENV=__PROJECT_DIR__/config/telemetry.env
+ExecStart=__PROJECT_DIR__/.venv/bin/telemetry-web
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+```
+
+## `systemd/car-telemetry.service.template`
+
+```ini
+[Unit]
+Description=Vehicle Telemetry Engine
+After=network.target bluetooth.service
+Wants=bluetooth.service
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__PROJECT_DIR__
+Environment=PYTHONUNBUFFERED=1
+Environment=TELEMETRY_ENV=__PROJECT_DIR__/config/telemetry.env
+ExecStart=__PROJECT_DIR__/.venv/bin/telemetry-engine
+Restart=always
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target
+```
+
+## `tests/test_pure.py`
+
+```python
+from car_telemetry.vehicle_profiles import safe_id
+from car_telemetry.benchmark import _grade
+
+
+def test_safe_id():
+    assert safe_id("VIN A/B") == "VIN_A_B"
+
+
+def test_benchmark_grade_pass():
+    report = {
+        "metrics": {
+            "minSystemAvailableMb": 120,
+            "averageSystemCpuPercent": 40,
+            "processRssGrowthMb": 2,
+            "throttledEnd": "throttled=0x0",
+        },
+        "workers": {
+            "web-stream": {"deadlineMissPercent": 0.0, "p95WorkMs": 5.0},
+            "imu": {"deadlineMissPercent": 0.0, "p95WorkMs": 1.0},
+        },
+    }
+    result, _ = _grade(report)
+    assert result == "PASS"
+```

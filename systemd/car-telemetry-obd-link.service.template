@@ -1,0 +1,15 @@
+[Unit]
+Description=Vehicle Telemetry Bluetooth RFCOMM Link
+After=bluetooth.service
+Wants=bluetooth.service
+Before=car-telemetry.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=__PROJECT_DIR__/scripts/obd-link.sh __PROJECT_DIR__/config/telemetry.env
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
