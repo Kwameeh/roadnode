@@ -10,6 +10,8 @@ telemetry obd-transport auto
 telemetry obd-reconnect
 telemetry dtc-refresh
 telemetry dtc-clear --confirm
+telemetry oled-test --driver sh1106
+telemetry oled-test --driver ssd1306
 telemetry bluetooth-scan --seconds 10
 telemetry bluetooth-pair --mac AA:BB:CC:DD:EE:FF --pin 1234
 telemetry bluetooth-use-elm --mac AA:BB:CC:DD:EE:FF

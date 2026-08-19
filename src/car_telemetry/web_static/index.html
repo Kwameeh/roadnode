@@ -13,6 +13,7 @@
       <p id="vehicle-subtitle">Waiting for vehicle…</p>
     </div>
     <div class="status-row">
+      <span id="badge-live" class="badge warn">Connecting</span>
       <span id="badge-gps" class="badge">GPS</span>
       <span id="badge-obd" class="badge">OBD</span>
       <span id="badge-mqtt" class="badge">Cloud</span>
@@ -115,12 +116,14 @@
           <div><dt>IP address</dt><dd id="sys-ip">--</dd></div>
           <div><dt>Uptime</dt><dd id="sys-uptime">--</dd></div>
           <div><dt>Agent</dt><dd id="sys-agent">--</dd></div>
+          <div><dt>MQTT buffer</dt><dd id="mqtt-buffer">--</dd></div>
+          <div><dt>OLED</dt><dd id="oled-status">--</dd></div>
         </dl>
       </div>
     </section>
   </main>
 
   <div id="toast" class="toast"></div>
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=4"></script>
 </body>
 </html>

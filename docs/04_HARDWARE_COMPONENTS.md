@@ -5,7 +5,7 @@ Prototype 1:
 - Raspberry Pi Zero 2 W
 - GPS module on UART
 - MPU6050 on I2C
-- optional 128×64 SSD1306 OLED on I2C
+- optional 1.3-inch 128×64 SH1106 or SSD1306 OLED on I2C
 - USB OTG adapter for a USB ELM327
 - onboard Bluetooth for Bluetooth ELM327 / Android emulator
 - power bank

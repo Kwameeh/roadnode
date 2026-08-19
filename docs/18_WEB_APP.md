@@ -10,4 +10,4 @@ Pages:
 - Setup — Auto/USB/Bluetooth transport and Bluetooth management
 - System — CPU, RAM, temperature, disk, IP and uptime
 
-Live state is pushed to the browser with a WebSocket.
+Live state is read from the engine's in-memory localhost API once at up to 5 Hz and fanned out to every browser through a WebSocket. Every frame carries the engine source and last-success time, so a healthy WebSocket cannot hide a stalled engine. The browser shows `Live`, `Reconnecting`, `Engine stale` or `Stale`, reconnects with bounded backoff, and falls back to `/api/state` polling without reloading the page. The disk status file is only a startup/diagnostic fallback.

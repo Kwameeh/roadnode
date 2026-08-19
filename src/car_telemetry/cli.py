@@ -90,6 +90,10 @@ def main():
     bt_use.add_argument('--mac', required=True)
     bt_use.add_argument('--channel', type=int)
 
+    oled_test = sub.add_parser('oled-test')
+    oled_test.add_argument('--driver', choices=['sh1106', 'ssd1306'])
+    oled_test.add_argument('--seconds', type=float, default=3.0)
+
     bench = sub.add_parser('benchmark')
     bench.add_argument('--seconds', type=int, default=120)
     bench.add_argument('--stress', type=float, default=1.0)
@@ -179,6 +183,12 @@ def main():
         if args.channel is not None:
             payload['channel'] = args.channel
         print(json.dumps(api.post('/bluetooth/use-elm', payload), indent=2))
+        return 0
+
+    if args.cmd == 'oled-test':
+        from .oled import test_display
+
+        test_display(s, args.driver, max(0.2, args.seconds))
         return 0
 
     if args.cmd == 'benchmark':

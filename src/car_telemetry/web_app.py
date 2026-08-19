@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
+from typing import Any
 
 import uvicorn
 from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -17,18 +20,122 @@ S = settings()
 ENGINE = EngineAPI(S.api_host, S.api_port)
 STATIC_DIR = Path(__file__).with_name('web_static')
 
-app = FastAPI(title='Car Telemetry', docs_url=None, redoc_url=None)
+
+class TelemetryHub:
+    """Poll the in-memory engine once and fan the newest state out to all browsers."""
+
+    def __init__(self, engine: EngineAPI, status_file: str, interval: float):
+        self.engine = engine
+        self.status_file = status_file
+        self.interval = max(0.1, interval)
+        self.latest: dict[str, Any] | None = None
+        self.latest_payload: str | None = None
+        self.revision = 0
+        self.last_engine_update = 0.0
+        self.last_engine_update_at: float | None = None
+        self.engine_error: str | None = None
+        self._condition = asyncio.Condition()
+        self._task: asyncio.Task | None = None
+
+    async def start(self):
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self._run(), name='web-telemetry-hub')
+
+    async def stop(self):
+        task, self._task = self._task, None
+        if task is None:
+            return
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+    async def _fetch(self) -> dict[str, Any]:
+        try:
+            data = await asyncio.to_thread(self.engine.get, '/state')
+            self.last_engine_update = time.monotonic()
+            self.last_engine_update_at = time.time()
+            self.engine_error = None
+            return {
+                **data,
+                '_web': {
+                    'engineConnected': True,
+                    'source': 'engine',
+                    'lastEngineUpdateAt': self.last_engine_update_at,
+                    'error': None,
+                },
+            }
+        except Exception as exc:
+            self.engine_error = str(exc)
+            fallback = await asyncio.to_thread(read_json, self.status_file)
+            return {
+                **(fallback or {'agent': 'starting'}),
+                '_web': {
+                    'engineConnected': False,
+                    'source': 'status-file' if fallback else 'starting',
+                    'lastEngineUpdateAt': self.last_engine_update_at,
+                    'error': self.engine_error,
+                },
+            }
+
+    async def _run(self):
+        while True:
+            data = await self._fetch()
+            payload = json.dumps(data, separators=(',', ':'), default=str)
+            if payload != self.latest_payload:
+                async with self._condition:
+                    self.latest = data
+                    self.latest_payload = payload
+                    self.revision += 1
+                    self._condition.notify_all()
+            await asyncio.sleep(self.interval)
+
+    async def next_payload(self, revision: int, heartbeat: float) -> tuple[str, int]:
+        async with self._condition:
+            if self.latest_payload is None:
+                await self._condition.wait_for(lambda: self.latest_payload is not None)
+            elif revision == self.revision:
+                with suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(
+                        self._condition.wait_for(lambda: revision != self.revision),
+                        timeout=max(1.0, heartbeat),
+                    )
+            return self.latest_payload or '{"agent":"starting"}', self.revision
+
+
+HUB = TelemetryHub(ENGINE, S.status_file, S.web_state_refresh_seconds)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    await HUB.start()
+    try:
+        yield
+    finally:
+        await HUB.stop()
+
+
+app = FastAPI(title='Car Telemetry', docs_url=None, redoc_url=None, lifespan=lifespan)
 app.mount('/static', StaticFiles(directory=str(STATIC_DIR)), name='static')
 
 
 @app.get('/')
 def index():
-    return FileResponse(STATIC_DIR / 'index.html')
+    return FileResponse(STATIC_DIR / 'index.html', headers={'Cache-Control': 'no-cache'})
 
 
 @app.get('/api/state')
-def state():
-    return read_json(S.status_file) or {'agent': 'starting'}
+async def state():
+    if HUB.latest is not None:
+        return HUB.latest
+    return await HUB._fetch()
+
+
+@app.get('/api/web-config')
+def web_config():
+    return {
+        'heartbeatSeconds': S.web_heartbeat_seconds,
+        'fallbackPollSeconds': S.web_fallback_poll_seconds,
+    }
 
 
 @app.get('/api/signals')
@@ -131,16 +238,12 @@ def bluetooth_use_elm(payload: dict = Body(default_factory=dict)):
 @app.websocket('/ws/telemetry')
 async def telemetry_socket(websocket: WebSocket):
     await websocket.accept()
-    last_payload = None
+    revision = 0
     try:
         while True:
-            data = read_json(S.status_file) or {'agent': 'starting'}
-            payload = json.dumps(data, separators=(',', ':'), default=str)
-            if payload != last_payload:
-                await websocket.send_text(payload)
-                last_payload = payload
-            await asyncio.sleep(max(0.2, S.web_state_refresh_seconds))
-    except WebSocketDisconnect:
+            payload, revision = await HUB.next_payload(revision, S.web_heartbeat_seconds)
+            await websocket.send_text(payload)
+    except (WebSocketDisconnect, RuntimeError):
         return
 
 

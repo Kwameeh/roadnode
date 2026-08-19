@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,6 +15,11 @@ def _bool(name: str, default: bool) -> bool:
 
 def _int_auto(value: str) -> int:
     return int(value, 0)
+
+
+def _identifier(value: str) -> str:
+    token = re.sub(r"[^A-Za-z0-9_-]+", "-", value.strip()).strip("-")
+    return token or "unknown"
 
 
 def env_candidates(explicit: str | None = None) -> list[Path]:
@@ -103,9 +109,14 @@ class Settings:
     impact_g: float
 
     oled_enabled: bool
+    oled_driver: str
+    oled_i2c_bus: int
     oled_address: int
     oled_width: int
     oled_height: int
+    oled_rotation: int
+    oled_page_seconds: float
+    oled_contrast: int
 
     obd_enabled: bool
     obd_transport: str
@@ -133,14 +144,18 @@ class Settings:
     web_host: str
     web_port: int
     web_state_refresh_seconds: float
+    web_heartbeat_seconds: float
+    web_fallback_poll_seconds: float
     bluetooth_scan_seconds: int
 
     mqtt_enabled: bool
     mqtt_host: str
     mqtt_port: int
+    mqtt_client_id: str
     mqtt_topic: str
     mqtt_dtc_topic: str
     mqtt_metadata_topic: str
+    mqtt_status_topic: str
     mqtt_username: str
     mqtt_password: str
     mqtt_tls: bool
@@ -148,6 +163,7 @@ class Settings:
     mqtt_client_cert: str
     mqtt_client_key: str
     mqtt_publish_seconds: float
+    mqtt_buffer_seconds: float
 
     status_file: str
 
@@ -171,9 +187,11 @@ def settings(explicit: str | None = None) -> Settings:
     )
 
     vehicle_id = os.getenv("VEHICLE_ID", "VEH-001")
+    device_id = os.getenv("DEVICE_ID", "PROTO-001")
+    topic_root = f"roadnode/v1/vehicles/{vehicle_id}"
 
     return Settings(
-        device_id=os.getenv("DEVICE_ID", "PROTO-001"),
+        device_id=device_id,
         vehicle_id=vehicle_id,
         prototype_stage=int(os.getenv("PROTOTYPE_STAGE", "1")),
         gps_enabled=_bool("GPS_ENABLED", True),
@@ -188,9 +206,14 @@ def settings(explicit: str | None = None) -> Settings:
         harsh_corner_mps2=float(os.getenv("HARSH_CORNER_MPS2", "3.5")),
         impact_g=float(os.getenv("IMPACT_G", "2.5")),
         oled_enabled=_bool("OLED_ENABLED", True),
+        oled_driver=os.getenv("OLED_DRIVER", "sh1106").strip().lower(),
+        oled_i2c_bus=int(os.getenv("OLED_I2C_BUS", "1")),
         oled_address=_int_auto(os.getenv("OLED_ADDRESS", "0x3C")),
         oled_width=int(os.getenv("OLED_WIDTH", "128")),
         oled_height=int(os.getenv("OLED_HEIGHT", "64")),
+        oled_rotation=int(os.getenv("OLED_ROTATION", "0")),
+        oled_page_seconds=float(os.getenv("OLED_PAGE_SECONDS", "3")),
+        oled_contrast=max(0, min(255, int(os.getenv("OLED_CONTRAST", "160")))),
         obd_enabled=_bool("OBD_ENABLED", True),
         obd_transport=os.getenv("OBD_TRANSPORT", "auto").strip().lower(),
         obd_usb_port=os.getenv("OBD_USB_PORT", "auto").strip(),
@@ -215,21 +238,28 @@ def settings(explicit: str | None = None) -> Settings:
         web_enabled=_bool("WEB_ENABLED", True),
         web_host=os.getenv("WEB_HOST", "0.0.0.0"),
         web_port=int(os.getenv("WEB_PORT", "8080")),
-        web_state_refresh_seconds=float(os.getenv("WEB_STATE_REFRESH_SECONDS", "0.5")),
+        web_state_refresh_seconds=float(os.getenv("WEB_STATE_REFRESH_SECONDS", "0.2")),
+        web_heartbeat_seconds=float(os.getenv("WEB_HEARTBEAT_SECONDS", "5")),
+        web_fallback_poll_seconds=float(os.getenv("WEB_FALLBACK_POLL_SECONDS", "1")),
         bluetooth_scan_seconds=int(os.getenv("BLUETOOTH_SCAN_SECONDS", "10")),
         mqtt_enabled=_bool("MQTT_ENABLED", False),
         mqtt_host=os.getenv("MQTT_HOST", "").strip(),
-        mqtt_port=int(os.getenv("MQTT_PORT", "1883")),
-        mqtt_topic=os.getenv("MQTT_TOPIC", f"vehicles/{vehicle_id}/telemetry"),
-        mqtt_dtc_topic=os.getenv("MQTT_DTC_TOPIC", f"vehicles/{vehicle_id}/dtc"),
-        mqtt_metadata_topic=os.getenv("MQTT_METADATA_TOPIC", f"vehicles/{vehicle_id}/metadata"),
+        mqtt_port=int(os.getenv("MQTT_PORT", "8883")),
+        mqtt_client_id=os.getenv(
+            "MQTT_CLIENT_ID", f"roadnode-pi-{_identifier(device_id)}"
+        ).strip(),
+        mqtt_topic=os.getenv("MQTT_TOPIC", f"{topic_root}/telemetry"),
+        mqtt_dtc_topic=os.getenv("MQTT_DTC_TOPIC", f"{topic_root}/dtc"),
+        mqtt_metadata_topic=os.getenv("MQTT_METADATA_TOPIC", f"{topic_root}/metadata"),
+        mqtt_status_topic=os.getenv("MQTT_STATUS_TOPIC", f"{topic_root}/status"),
         mqtt_username=os.getenv("MQTT_USERNAME", ""),
         mqtt_password=os.getenv("MQTT_PASSWORD", ""),
-        mqtt_tls=_bool("MQTT_TLS", False),
+        mqtt_tls=_bool("MQTT_TLS", True),
         mqtt_ca_cert=os.path.expanduser(os.getenv("MQTT_CA_CERT", "")),
         mqtt_client_cert=os.path.expanduser(os.getenv("MQTT_CLIENT_CERT", "")),
         mqtt_client_key=os.path.expanduser(os.getenv("MQTT_CLIENT_KEY", "")),
-        mqtt_publish_seconds=float(os.getenv("MQTT_PUBLISH_SECONDS", "2")),
+        mqtt_publish_seconds=max(0.2, float(os.getenv("MQTT_PUBLISH_SECONDS", "3"))),
+        mqtt_buffer_seconds=max(1.0, float(os.getenv("MQTT_BUFFER_SECONDS", "60"))),
         status_file=os.path.expanduser(
             os.getenv("STATUS_FILE", "~/.local/state/car-telemetry/status.json")
         ),
