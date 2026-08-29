@@ -41,6 +41,7 @@ def _telemetry_obd(obd_state: dict) -> dict:
 
 def metadata_body(snapshot: dict) -> dict:
     obd_state = snapshot.get('obd', {})
+    policy = obd_state.get('signalPolicy', {})
     return {
         'vehicleProfileKey': obd_state.get('vehicleProfileKey'),
         'vehicle': obd_state.get('vehicle', {}),
@@ -50,6 +51,11 @@ def metadata_body(snapshot: dict) -> dict:
         'supportedSignals': [item.get('name') for item in obd_state.get('supportedSignals', [])],
         'coreSignals': obd_state.get('coreSignals', []),
         'selectedSignals': obd_state.get('selectedSignals', []),
+        # EDGE-004: the revision is what lets a subscriber tell a real
+        # selection change from a device that merely reconnected.
+        'signalsRevision': obd_state.get('signalsRevision'),
+        'unavailableCoreSignals': policy.get('unavailableCore', []),
+        'signalCycleSeconds': policy.get('cycleSeconds'),
     }
 
 

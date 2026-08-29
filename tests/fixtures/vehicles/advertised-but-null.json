@@ -1,0 +1,14 @@
+{
+  "vehicleKey": "advertised-but-null",
+  "description": "Vehicle advertises FUEL_LEVEL and INTAKE_TEMP but returns null responses for them.",
+  "protocolName": "ISO 9141-2",
+  "supportedCommands": [
+    "RPM", "SPEED", "COOLANT_TEMP", "INTAKE_TEMP", "FUEL_LEVEL",
+    "CONTROL_MODULE_VOLTAGE"
+  ],
+  "nullResponses": ["FUEL_LEVEL", "INTAKE_TEMP"],
+  "responses": {
+    "RPM": 780, "SPEED": 0, "COOLANT_TEMP": 79,
+    "CONTROL_MODULE_VOLTAGE": 12.6
+  }
+}

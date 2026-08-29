@@ -9,21 +9,22 @@ from typing import Any
 import obd
 
 from .config import Settings
-from .obd_transport import resolve
-from .state import DeviceState
-from .vehicle_profiles import ProfileStore
-
-CORE_FALLBACK = (
-    "RPM",
-    "SPEED",
-    "COOLANT_TEMP",
-    "ENGINE_LOAD",
-    "THROTTLE_POS",
-    "CONTROL_MODULE_VOLTAGE",
-    "FUEL_LEVEL",
-    "INTAKE_TEMP",
-    "MAF",
+from .observations import (
+    FAST_OBD_SIGNALS,
+    FAST_OBD_MAX_AGE_MS,
+    SLOW_OBD_MAX_AGE_MS,
+    ObservationWriter,
+    normalize_obd_value,
+    observation_meta,
 )
+from .obd_transport import resolve
+from .signal_policy import CORE_SIGNALS
+from .signal_selection import (
+    SignalSelectionError,
+    SignalSelectionService,
+    SignalSelectionStore,
+)
+from .state import DeviceState
 EXCLUDED_LIVE_PREFIXES = ("PIDS_", "MIDS_", "DTC_")
 EXCLUDED_LIVE = {
     "STATUS",
@@ -45,7 +46,7 @@ EXCLUDED_LIVE = {
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def serializable(value: Any) -> Any:
@@ -135,16 +136,25 @@ def _normalize_freeze_dtc(value: Any) -> dict[str, str] | None:
 
 
 class OBDService:
-    def __init__(self, settings: Settings, state: DeviceState):
+    def __init__(
+        self,
+        settings: Settings,
+        state: DeviceState,
+        observations: ObservationWriter,
+    ):
         self.s = settings
         self.state = state
+        self.observations = observations
         self.lock = threading.RLock()
         self.connection = None
         self.transport_override: str | None = None
-        self.store = ProfileStore(settings.vehicle_profile_dir)
+        self.store = SignalSelectionStore(settings.vehicle_profile_dir)
         self.vehicle_key = settings.vehicle_id
-        self.profile = self.store.load(self.vehicle_key)
-        self.user_selected = set(self.profile.get("selectedSignals", []))
+        self.signals = SignalSelectionService(
+            self.store,
+            self.vehicle_key,
+            round_trip_seconds=settings.obd_round_trip_seconds,
+        )
         self.dtc_events: deque[dict[str, Any]] = deque(maxlen=max(10, settings.dtc_max_events))
         self.dtc_event_seq = 0
         self._last_dtc_sets: dict[str, set[str]] = {"stored": set(), "currentCycle": set()}
@@ -167,6 +177,7 @@ class OBDService:
                 except Exception:
                     pass
             self.connection = None
+            self.observations.update_obd_status(connected=False, engine_on=None)
 
     def _query(self, connection, command, *, force: bool = False):
         response = obd.OBD.query(connection, command, force=force)
@@ -217,9 +228,10 @@ class OBDService:
 
         vin = metadata.get("VIN")
         if isinstance(vin, str) and vin.strip():
+            # The VIN is the real vehicle identity, so an owner's selection
+            # follows the car rather than the device it was first made on.
             self.vehicle_key = vin.strip()
-            self.profile = self.store.load(self.vehicle_key)
-            self.user_selected = set(self.profile.get("selectedSignals", []))
+            self.signals.use_vehicle(self.vehicle_key)
 
         metadata.update(
             {
@@ -235,7 +247,14 @@ class OBDService:
     def _callback(self, name: str, meta: dict[str, Any]):
         def callback(response):
             try:
-                value = None if response.is_null() else serializable(response.value)
+                observed_at = utc_now()
+                is_null = response.is_null()
+                value = None if is_null else serializable(response.value)
+                max_age_ms = (
+                    FAST_OBD_MAX_AGE_MS
+                    if name in FAST_OBD_SIGNALS
+                    else SLOW_OBD_MAX_AGE_MS
+                )
                 self.state.merge_nested(
                     "obd",
                     "signals",
@@ -244,9 +263,37 @@ class OBDService:
                             **meta,
                             "value": value,
                             "updatedAt": time.time(),
+                            "observedAt": observed_at,
+                            "source": "obd.pid",
+                            "quality": "invalid" if is_null else "valid",
+                            "maxAgeMs": max_age_ms,
                         }
                     },
                 )
+                if not is_null:
+                    normalized_value, unit = normalize_obd_value(name, response.value)
+                    self.observations.update_obd_signal(
+                        name,
+                        {
+                            "value": normalized_value,
+                            "unit": unit,
+                            **observation_meta(
+                                observed_at=observed_at,
+                                source="obd.pid",
+                                quality="valid",
+                                max_age_ms=max_age_ms,
+                            ),
+                        },
+                    )
+                    if name == "RPM":
+                        try:
+                            engine_on = float(normalized_value) > 0
+                        except (TypeError, ValueError):
+                            engine_on = None
+                        self.observations.update_obd_status(
+                            connected=True,
+                            engine_on=engine_on,
+                        )
             except Exception as exc:
                 self.state.merge("obd", {"lastCallbackError": str(exc)})
 
@@ -262,20 +309,8 @@ class OBDService:
         live_meta = [command_meta(command) for command in supported.values() if is_live_candidate(command)]
         live_meta.sort(key=lambda item: item["name"])
 
-        core = [
-            name
-            for name in (self.s.obd_core_signals or CORE_FALLBACK)
-            if name in supported and is_live_candidate(supported[name])
-        ]
-        extras = [
-            name
-            for name in sorted(self.user_selected)
-            if name in supported and is_live_candidate(supported[name])
-        ]
-        selected: list[str] = []
-        for name in core + extras:
-            if name not in selected:
-                selected.append(name)
+        plan = self.signals.observe_supported(item["name"] for item in live_meta)
+        selected = list(plan.selected)
 
         with connection.paused():
             connection.unwatch_all()
@@ -286,56 +321,33 @@ class OBDService:
         all_supported = [command_meta(command) for command in supported.values()]
         all_supported.sort(key=lambda item: (item.get("mode") is None, item.get("mode") or 0, item["name"]))
 
-        self.profile.update(
-            {
-                "vehicleKey": self.vehicle_key,
-                "selectedSignals": sorted(self.user_selected),
-                "supportedSignals": sorted(item["name"] for item in live_meta),
-                "updatedAt": utc_now(),
-            }
-        )
-        self.store.save(self.vehicle_key, self.profile)
-
         self.state.merge(
             "obd",
             {
                 "supportedSignals": live_meta,
                 "supportedCommandsAll": all_supported,
-                "coreSignals": core,
+                "coreSignals": list(CORE_SIGNALS),
                 "selectedSignals": selected,
-                "userSelectedSignals": extras,
+                "userSelectedSignals": list(self.signals.selection.requested),
+                "signalPolicy": self.signals.ui_document(),
+                "signalsRevision": plan.revision,
                 "supportedCount": len(live_meta),
                 "supportedCommandCount": len(all_supported),
             },
         )
 
-    def select_signal(self, name: str, selected: bool = True) -> None:
-        name = name.upper().strip()
+    def select_signal(self, name: str, selected: bool = True) -> dict[str, Any]:
+        """Apply one Signals-UI choice. Refusals carry the reason to display.
+
+        The choice is persisted before the watches change, so a crash between
+        the two loses a poll cycle rather than the owner's setting.
+        """
         with self.lock:
             if not self.connection:
-                raise RuntimeError("OBD is not connected")
-            supported = {
-                item["name"]
-                for item in self.state.snapshot().get("obd", {}).get("supportedSignals", [])
-            }
-            if name not in supported:
-                raise ValueError(f"{name} is not a supported live signal")
-            if name in self.s.obd_core_signals and not selected:
-                raise ValueError("Core signals cannot be removed")
-            if selected:
-                self.user_selected.add(name)
-            else:
-                self.user_selected.discard(name)
-            self.profile.update(
-                {
-                    "vehicleKey": self.vehicle_key,
-                    "selectedSignals": sorted(self.user_selected),
-                    "supportedSignals": sorted(supported),
-                    "updatedAt": utc_now(),
-                }
-            )
-            self.store.save(self.vehicle_key, self.profile)
+                raise SignalSelectionError("OBD is not connected")
+            self.signals.select(name, selected)
             self._configure_watches(self.connection)
+            return self.signals.ui_document()
 
     def _append_dtc_event(self, event: str, scope: str, code: str = "", description: str = "", **extra) -> dict[str, Any]:
         self.dtc_event_seq += 1
@@ -506,8 +518,7 @@ class OBDService:
 
         self.connection = connection
         vehicle = self._query_static(connection)
-        self.profile.update({"vehicleKey": self.vehicle_key, "vehicle": vehicle, "updatedAt": utc_now()})
-        self.store.save(self.vehicle_key, self.profile)
+        self.store.save(self.signals.selection, vehicle=vehicle)
         self._configure_watches(connection)
 
         self.state.merge(
@@ -524,11 +535,17 @@ class OBDService:
                 "vehicleProfileKey": self.vehicle_key,
             },
         )
+        rpm = self._rpm_value()
+        self.observations.update_obd_status(
+            connected=True,
+            engine_on=rpm > 0 if rpm is not None else None,
+        )
         connection.start()
 
     def run(self, stop_event: threading.Event) -> None:
         if not self.s.obd_enabled:
             self.state.merge("obd", {"enabled": False})
+            self.observations.update_obd_status(connected=False, engine_on=None)
             return
 
         next_dtc_scan = 0.0
@@ -559,6 +576,7 @@ class OBDService:
                         "error": str(exc),
                     },
                 )
+                self.observations.update_obd_status(connected=False, engine_on=None)
                 self.reconnect()
                 stop_event.wait(self.s.obd_reconnect_seconds)
 

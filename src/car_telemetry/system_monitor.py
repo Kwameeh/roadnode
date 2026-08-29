@@ -4,9 +4,15 @@ import os
 import shutil
 import socket
 import threading
-import time
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
+from .observations import (
+    DEVICE_MAX_AGE_MS,
+    ObservationWriter,
+    observation_meta,
+    utc_now,
+)
 from .state import DeviceState
 
 
@@ -41,7 +47,11 @@ def _cpu_percent(before, after) -> float | None:
 
 
 def _temperature() -> float | None:
-    for path in (Path('/sys/class/thermal/thermal_zone0/temp'), Path('/sys/devices/virtual/thermal/thermal_zone0/temp')):
+    paths = (
+        Path('/sys/class/thermal/thermal_zone0/temp'),
+        Path('/sys/devices/virtual/thermal/thermal_zone0/temp'),
+    )
+    for path in paths:
         try:
             return round(float(path.read_text().strip()) / 1000.0, 1)
         except Exception:
@@ -60,12 +70,24 @@ def _ip_address() -> str | None:
         return None
 
 
-def worker(state: DeviceState, stop: threading.Event) -> None:
+def _software_version() -> str:
+    try:
+        return version("car-telemetry")
+    except PackageNotFoundError:
+        return "development"
+
+
+def worker(
+    state: DeviceState,
+    observations: ObservationWriter,
+    stop: threading.Event,
+) -> None:
     previous = _cpu_snapshot()
     while not stop.is_set():
         current = _cpu_snapshot()
         mem = _meminfo()
         disk = shutil.disk_usage('/')
+        observed_at = utc_now()
         payload = {
             'hostname': socket.gethostname(),
             'ipAddress': _ip_address(),
@@ -74,15 +96,39 @@ def worker(state: DeviceState, stop: threading.Event) -> None:
             'temperatureC': _temperature(),
             'memoryTotalMb': round(mem.get('MemTotal', 0.0), 1) if mem else None,
             'memoryAvailableMb': round(mem.get('MemAvailable', 0.0), 1) if mem else None,
-            'memoryUsedMb': round(mem.get('MemTotal', 0.0) - mem.get('MemAvailable', 0.0), 1) if mem else None,
+            'memoryUsedMb': (
+                round(mem.get('MemTotal', 0.0) - mem.get('MemAvailable', 0.0), 1)
+                if mem
+                else None
+            ),
             'diskTotalGb': round(disk.total / (1024**3), 2),
             'diskFreeGb': round(disk.free / (1024**3), 2),
             'loadAverage': list(os.getloadavg()) if hasattr(os, 'getloadavg') else None,
+            'observedAt': observed_at,
+            'source': 'device.os',
+            'quality': 'valid',
+            'maxAgeMs': DEVICE_MAX_AGE_MS,
         }
         try:
             payload['uptimeSeconds'] = float(Path('/proc/uptime').read_text().split()[0])
         except Exception:
             pass
         state.merge('system', payload)
+        mqtt_state = state.snapshot().get('mqtt', {})
+        device_observation = {
+            'temperatureC': payload.get('temperatureC'),
+            'network': 'connected' if payload.get('ipAddress') else 'offline',
+            'queueDepth': max(0, int(mqtt_state.get('bufferedMessages', 0) or 0)),
+            'softwareVersion': _software_version(),
+            **observation_meta(
+                observed_at=observed_at,
+                source='device.os',
+                quality='valid',
+                max_age_ms=DEVICE_MAX_AGE_MS,
+            ),
+        }
+        observations.update_device(
+            {key: value for key, value in device_observation.items() if value is not None}
+        )
         previous = current
         stop.wait(2.0)

@@ -1,0 +1,15 @@
+{
+  "vehicleKey": "full-support-petrol",
+  "description": "Modern petrol vehicle advertising the full core signal set.",
+  "protocolName": "ISO 15765-4 (CAN 11/500)",
+  "supportedCommands": [
+    "RPM", "SPEED", "COOLANT_TEMP", "INTAKE_TEMP", "ENGINE_LOAD",
+    "THROTTLE_POS", "FUEL_LEVEL", "CONTROL_MODULE_VOLTAGE", "MAF"
+  ],
+  "nullResponses": [],
+  "responses": {
+    "RPM": 1850, "SPEED": 62, "COOLANT_TEMP": 88, "INTAKE_TEMP": 34,
+    "ENGINE_LOAD": 41.2, "THROTTLE_POS": 18.4, "FUEL_LEVEL": 63.0,
+    "CONTROL_MODULE_VOLTAGE": 14.1, "MAF": 12.7
+  }
+}

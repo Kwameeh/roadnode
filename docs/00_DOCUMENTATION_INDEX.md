@@ -20,3 +20,13 @@ Key files:
 - `26_COMMAND_REFERENCE.md`
 - `31_PERFORMANCE_BENCHMARK.md`
 - `CODE_REFERENCE.md`
+
+Platform-wide, server, mobile, admin, company, and delivery documentation now lives at the workspace root rather than inside the edge-device repository:
+
+- [Workspace Documentation Index](../../docs/README.md)
+- [Connected Platform Master Plan](../../docs/platform/CONNECTED_PLATFORM_MASTER_PLAN.md)
+- [Edge and MQTT v2 Contract](../../docs/contracts/EDGE_MQTT_V2_CONTRACT.md)
+- [MQTT JSON Publish Examples](../../docs/contracts/MQTT_JSON_PUBLISH_EXAMPLES.md)
+- [Server Documentation](../../server/README.md)
+- [Owner Mobile App Documentation](../../app/README.md)
+- [Admin Web Documentation](../../admin-web/README.md)

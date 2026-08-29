@@ -1,0 +1,8 @@
+{
+  "vehicleKey": "minimal-legacy",
+  "description": "Older vehicle exposing only RPM and SPEED. Everything else is genuinely unknown.",
+  "protocolName": "ISO 14230-4 (KWP 5BAUD)",
+  "supportedCommands": ["RPM", "SPEED"],
+  "nullResponses": [],
+  "responses": {"RPM": 2100, "SPEED": 35}
+}

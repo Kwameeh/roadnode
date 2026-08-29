@@ -46,6 +46,8 @@ class APIServer:
                     return self.send_json(200, snapshot)
                 if self.path == '/signals':
                     obd = snapshot.get('obd', {})
+                    # The policy document is authoritative; the flat lists stay
+                    # for older readers of this local API.
                     return self.send_json(
                         200,
                         {
@@ -53,6 +55,7 @@ class APIServer:
                             'core': obd.get('coreSignals', []),
                             'selected': obd.get('selectedSignals', []),
                             'userSelected': obd.get('userSelectedSignals', []),
+                            'policy': outer.obd.signals.ui_document(),
                         },
                     )
                 if self.path == '/vehicle':
@@ -108,8 +111,10 @@ class APIServer:
                 body = self.body()
                 try:
                     if self.path == '/signals/select':
-                        outer.obd.select_signal(str(body.get('name', '')), bool(body.get('selected', True)))
-                        return self.send_json(200, {'ok': True})
+                        policy = outer.obd.select_signal(
+                            str(body.get('name', '')), bool(body.get('selected', True))
+                        )
+                        return self.send_json(200, {'ok': True, 'policy': policy})
 
                     if self.path == '/obd/reconnect':
                         outer.obd.reconnect()

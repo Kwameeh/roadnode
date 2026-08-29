@@ -103,6 +103,9 @@ class Settings:
     imu_address: int
     imu_rate_hz: float
     imu_calibration_samples: int
+    imu_orientation: str
+    imu_calibration_file: str
+    imu_calibration_max_age_days: int
     harsh_accel_mps2: float
     harsh_brake_mps2: float
     harsh_corner_mps2: float
@@ -130,7 +133,7 @@ class Settings:
     obd_timeout: float
     obd_async_loop_delay: float
     obd_reconnect_seconds: float
-    obd_core_signals: tuple[str, ...]
+    obd_round_trip_seconds: float
 
     dtc_scan_seconds: float
     dtc_max_events: int
@@ -165,6 +168,13 @@ class Settings:
     mqtt_publish_seconds: float
     mqtt_buffer_seconds: float
 
+    device_credential_file: str
+
+    outbox_file: str
+    outbox_max_bytes: int
+    outbox_max_age_seconds: int
+    outbox_batch_size: int
+
     status_file: str
 
 
@@ -176,15 +186,6 @@ def settings(explicit: str | None = None) -> Settings:
 
     protocol_raw = os.getenv("OBD_PROTOCOL", "auto").strip()
     protocol = None if protocol_raw.lower() == "auto" else protocol_raw
-
-    core = tuple(
-        item.strip().upper()
-        for item in os.getenv(
-            "OBD_CORE_SIGNALS",
-            "RPM,SPEED,COOLANT_TEMP,ENGINE_LOAD,THROTTLE_POS,CONTROL_MODULE_VOLTAGE,FUEL_LEVEL,INTAKE_TEMP,MAF",
-        ).split(",")
-        if item.strip()
-    )
 
     vehicle_id = os.getenv("VEHICLE_ID", "VEH-001")
     device_id = os.getenv("DEVICE_ID", "PROTO-001")
@@ -201,6 +202,18 @@ def settings(explicit: str | None = None) -> Settings:
         imu_address=_int_auto(os.getenv("IMU_ADDRESS", "0x68")),
         imu_rate_hz=float(os.getenv("IMU_RATE_HZ", "20")),
         imu_calibration_samples=int(os.getenv("IMU_CALIBRATION_SAMPLES", "150")),
+        imu_orientation=os.getenv(
+            "IMU_ORIENTATION", "x-forward-y-left-z-up"
+        ).strip().lower(),
+        imu_calibration_file=os.path.expanduser(
+            os.getenv(
+                "IMU_CALIBRATION_FILE",
+                "~/.local/share/car-telemetry/imu-calibration.json",
+            )
+        ),
+        imu_calibration_max_age_days=max(
+            1, int(os.getenv("IMU_CALIBRATION_MAX_AGE_DAYS", "90"))
+        ),
         harsh_accel_mps2=float(os.getenv("HARSH_ACCEL_MPS2", "3.0")),
         harsh_brake_mps2=float(os.getenv("HARSH_BRAKE_MPS2", "-3.0")),
         harsh_corner_mps2=float(os.getenv("HARSH_CORNER_MPS2", "3.5")),
@@ -226,7 +239,12 @@ def settings(explicit: str | None = None) -> Settings:
         obd_timeout=float(os.getenv("OBD_TIMEOUT", "0.2")),
         obd_async_loop_delay=float(os.getenv("OBD_ASYNC_LOOP_DELAY", "0.10")),
         obd_reconnect_seconds=float(os.getenv("OBD_RECONNECT_SECONDS", "4")),
-        obd_core_signals=core,
+        # The core signal list is a product decision in `signal_policy`, not a
+        # deployment tunable; what varies per install is how fast the adapter
+        # answers, which is what bounds the optional signals an owner may add.
+        obd_round_trip_seconds=max(
+            0.01, float(os.getenv("OBD_ROUND_TRIP_SECONDS", "0.08"))
+        ),
         dtc_scan_seconds=float(os.getenv("DTC_SCAN_SECONDS", "60")),
         dtc_max_events=int(os.getenv("DTC_MAX_EVENTS", "100")),
         dtc_clear_require_engine_off=_bool("DTC_CLEAR_REQUIRE_ENGINE_OFF", True),
@@ -260,6 +278,22 @@ def settings(explicit: str | None = None) -> Settings:
         mqtt_client_key=os.path.expanduser(os.getenv("MQTT_CLIENT_KEY", "")),
         mqtt_publish_seconds=max(0.2, float(os.getenv("MQTT_PUBLISH_SECONDS", "3"))),
         mqtt_buffer_seconds=max(1.0, float(os.getenv("MQTT_BUFFER_SECONDS", "60"))),
+        device_credential_file=os.path.expanduser(
+            os.getenv(
+                "DEVICE_CREDENTIAL_FILE",
+                "~/.local/share/car-telemetry/device-credential.json",
+            )
+        ),
+        outbox_file=os.path.expanduser(
+            os.getenv("OUTBOX_FILE", "~/.local/share/car-telemetry/outbox.sqlite3")
+        ),
+        outbox_max_bytes=max(
+            1_048_576, int(os.getenv("OUTBOX_MAX_BYTES", str(256 * 1024 * 1024)))
+        ),
+        outbox_max_age_seconds=max(
+            60, int(os.getenv("OUTBOX_MAX_AGE_SECONDS", str(24 * 60 * 60)))
+        ),
+        outbox_batch_size=max(1, int(os.getenv("OUTBOX_BATCH_SIZE", "50"))),
         status_file=os.path.expanduser(
             os.getenv("STATUS_FILE", "~/.local/state/car-telemetry/status.json")
         ),

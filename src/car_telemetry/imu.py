@@ -1,35 +1,188 @@
 from __future__ import annotations
-import math,threading,time
+
+import math
+import threading
+import time
+
 from .config import Settings
+from .imu_calibration import (
+    Calibration,
+    apply_calibration,
+    build_calibration,
+    load_calibration,
+    save_calibration,
+)
+from .observations import IMU_MAX_AGE_MS, ImuSample, ObservationWriter, utc_now
 from .state import DeviceState
 
-def open_sensor(s):
-    import board,adafruit_mpu6050
-    return adafruit_mpu6050.MPU6050(board.I2C(),address=s.imu_address)
 
-def worker(s:Settings,state:DeviceState,stop:threading.Event):
-    state.merge('imu',{'enabled':s.imu_enabled,'address':f'0x{s.imu_address:02X}'})
-    if not s.imu_enabled:return
+def open_sensor(settings: Settings):
+    import adafruit_mpu6050
+    import board
+
+    return adafruit_mpu6050.MPU6050(board.I2C(), address=settings.imu_address)
+
+
+def _calibrate(sensor, settings: Settings, state: DeviceState) -> Calibration:
+    rows = []
+    state.merge(
+        "imu",
+        {
+            "calibrating": True,
+            "calibrated": False,
+            "calibrationState": "running",
+            "calibrationPercent": 0,
+        },
+    )
+    for index in range(settings.imu_calibration_samples):
+        acceleration = sensor.acceleration
+        gyro = sensor.gyro
+        rows.append((*acceleration, *gyro))
+        if index % 10 == 0 or index == settings.imu_calibration_samples - 1:
+            state.merge(
+                "imu",
+                {
+                    "calibrationPercent": int(
+                        (index + 1) * 100 / settings.imu_calibration_samples
+                    )
+                },
+            )
+        time.sleep(0.02)
+    calibration = build_calibration(rows, orientation=settings.imu_orientation)
+    save_calibration(settings.imu_calibration_file, calibration)
+    return calibration
+
+
+def worker(
+    settings: Settings,
+    state: DeviceState,
+    observations: ObservationWriter,
+    stop: threading.Event,
+) -> None:
+    state.merge(
+        "imu",
+        {
+            "enabled": settings.imu_enabled,
+            "address": f"0x{settings.imu_address:02X}",
+            "orientation": settings.imu_orientation,
+        },
+    )
+    if not settings.imu_enabled:
+        observations.update_imu_status(
+            {"quality": "unknown", "inactiveReason": "sensor_disabled"}
+        )
+        return
+
     try:
-        sensor=open_sensor(s); sums=[0.0]*6
-        state.merge('imu',{'calibrating':True,'calibrationPercent':0})
-        for i in range(s.imu_calibration_samples):
-            a=sensor.acceleration; g=sensor.gyro; vals=(*a,*g)
-            sums=[x+y for x,y in zip(sums,vals)]
-            if i%10==0 or i==s.imu_calibration_samples-1: state.merge('imu',{'calibrationPercent':int((i+1)*100/s.imu_calibration_samples)})
-            time.sleep(.02)
-        off=[x/s.imu_calibration_samples for x in sums]
-        state.merge('imu',{'calibrating':False,'calibrated':True,'error':None})
-    except Exception as e:
-        state.merge('imu',{'calibrating':False,'calibrated':False,'error':str(e)}); return
-    interval=1/max(s.imu_rate_hz,1)
+        sensor = open_sensor(settings)
+        calibration, calibration_state = load_calibration(
+            settings.imu_calibration_file,
+            orientation=settings.imu_orientation,
+            max_age_days=settings.imu_calibration_max_age_days,
+        )
+        state.merge("imu", {"calibrationState": calibration_state})
+        if calibration is None:
+            calibration = _calibrate(sensor, settings, state)
+            calibration_state = "valid"
+        state.merge(
+            "imu",
+            {
+                "calibrating": False,
+                "calibrated": True,
+                "calibrationState": calibration_state,
+                "calibrationVersion": calibration.version,
+                "calibrationCreatedAt": calibration.created_at,
+                "error": None,
+            },
+        )
+        observations.update_imu_status(
+            {
+                "sampleRateHz": settings.imu_rate_hz,
+                "calibrationVersion": calibration.version,
+                "orientation": calibration.orientation,
+                "source": "imu.mpu6050",
+                "quality": "valid",
+                "maxAgeMs": IMU_MAX_AGE_MS,
+                "inactiveReason": None,
+            }
+        )
+    except Exception as exc:
+        state.merge(
+            "imu",
+            {
+                "calibrating": False,
+                "calibrated": False,
+                "calibrationState": "invalid",
+                "error": str(exc),
+            },
+        )
+        observations.update_imu_status(
+            {
+                "calibrationVersion": None,
+                "orientation": settings.imu_orientation,
+                "quality": "invalid",
+                "inactiveReason": "calibration_invalid",
+            }
+        )
+        return
+
+    interval = 1 / max(settings.imu_rate_hz, 1)
     while not stop.is_set():
         try:
-            ax,ay,az=sensor.acceleration; gx,gy,gz=sensor.gyro
-            lx,ly,lz=ax-off[0],ay-off[1],az-off[2]; rg=math.sqrt(ax*ax+ay*ay+az*az)/9.80665
-            state.merge('imu',{'linearAccelerationMps2':{'x':round(lx,3),'y':round(ly,3),'z':round(lz,3)},
-              'gyroRadPerSec':{'x':round(gx-off[3],3),'y':round(gy-off[4],3),'z':round(gz-off[5],3)},'resultantG':round(rg,3),'temperatureC':round(float(sensor.temperature),2),'error':None})
-            state.merge('events',{'harshAcceleration':lx>=s.harsh_accel_mps2,'harshBraking':lx<=s.harsh_brake_mps2,
-              'harshCornering':abs(ly)>=s.harsh_corner_mps2,'possibleImpact':rg>=s.impact_g})
-        except Exception as e: state.merge('imu',{'error':str(e)})
+            observed_at = utc_now()
+            acceleration = tuple(float(value) for value in sensor.acceleration)
+            gyro = tuple(float(value) for value in sensor.gyro)
+            calibrated_accel, calibrated_gyro = apply_calibration(
+                acceleration, gyro, calibration
+            )
+            ax, ay, az = calibrated_accel
+            gx, gy, gz = calibrated_gyro
+            resultant_g = math.sqrt(ax * ax + ay * ay + az * az) / 9.80665
+            state.merge(
+                "imu",
+                {
+                    "linearAccelerationMps2": {
+                        "x": round(ax, 3),
+                        "y": round(ay, 3),
+                        "z": round(az, 3),
+                    },
+                    "gyroRadPerSec": {
+                        "x": round(gx, 3),
+                        "y": round(gy, 3),
+                        "z": round(gz, 3),
+                    },
+                    "resultantG": round(resultant_g, 3),
+                    "temperatureC": round(float(sensor.temperature), 2),
+                    "observedAt": observed_at,
+                    "source": "imu.mpu6050",
+                    "quality": "valid",
+                    "maxAgeMs": IMU_MAX_AGE_MS,
+                    "error": None,
+                },
+            )
+            observations.append_imu_sample(
+                ImuSample(
+                    observed_at=observed_at,
+                    ax=round(ax, 6),
+                    ay=round(ay, 6),
+                    az=round(az, 6),
+                    gx=round(gx, 6),
+                    gy=round(gy, 6),
+                    gz=round(gz, 6),
+                )
+            )
+            state.merge(
+                "events",
+                {
+                    "harshAcceleration": ax >= settings.harsh_accel_mps2,
+                    "harshBraking": ax <= settings.harsh_brake_mps2,
+                    "harshCornering": abs(ay) >= settings.harsh_corner_mps2,
+                    "possibleImpact": resultant_g >= settings.impact_g,
+                },
+            )
+        except Exception as exc:
+            state.merge("imu", {"quality": "invalid", "error": str(exc)})
+            observations.update_imu_status(
+                {"quality": "invalid", "inactiveReason": "sensor_read_error"}
+            )
         stop.wait(interval)

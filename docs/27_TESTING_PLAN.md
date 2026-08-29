@@ -11,6 +11,8 @@ Recommended order:
 7. live core signals and optional-signal selection
 8. automatic/manual DTC scans
 9. USB ELM327 transport
-10. MQTT telemetry/metadata/DTC events
-11. benchmark with multiple simulated web clients
-12. physical vehicle validation
+10. persisted IMU calibration identity, stale/invalid recovery, and configured orientation
+11. one-second v2 frames with 20 ordered IMU samples and original GPS/OBD/device timestamps
+12. MQTT telemetry/metadata/DTC events
+13. benchmark with multiple simulated web clients
+14. physical vehicle validation

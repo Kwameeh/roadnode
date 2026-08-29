@@ -153,21 +153,36 @@ async function loadSignals() {
 }
 
 function renderSignals(data) {
+  const policy = data.policy || {};
   const query = $('signal-search').value.trim().toLowerCase();
-  const core = new Set(data.core || []);
-  const selected = new Set(data.selected || []);
+  // The device decides tier, state and wording. The UI never re-derives them,
+  // so a browser left open on an old page cannot offer a stale choice.
+  const decisions = new Map((policy.decisions || []).map((item) => [item.name, item]));
+  const explanation = policy.explanation || [];
+  $('signal-summary').innerHTML = policy.connected
+    ? explanation.map((line) => `<p>${escapeHtml(line)}</p>`).join('')
+    : '<p>Connect to the vehicle to see which signals it offers.</p>';
+
   const rows = signalCatalog.filter((signal) => !query || `${signal.name} ${signal.description}`.toLowerCase().includes(query));
   $('signal-list').innerHTML = rows.length ? rows.map((signal) => {
-    const isCore = core.has(signal.name);
-    const isSelected = selected.has(signal.name);
-    return `<div class="list-row"><div class="meta"><b>${escapeHtml(signal.name)} ${isCore ? '<small>CORE</small>' : ''}</b><small>${escapeHtml(signal.description || '')}</small></div>${isCore ? '<span class="small">Always on</span>' : `<button data-signal="${escapeHtml(signal.name)}" data-selected="${isSelected}">${isSelected ? 'Remove' : 'Add'}</button>`}</div>`;
+    const decision = decisions.get(signal.name) || {};
+    const isCore = decision.tier === 'core';
+    const isSelected = decision.state === 'selected';
+    const purpose = decision.purpose || signal.description || '';
+    const note = isCore ? 'Always on' : decision.state === 'rejected' ? escapeHtml(decision.reason || 'Not added') : '';
+    const control = isCore || decision.state === 'unavailable'
+      ? `<span class="small">${note || 'Not offered by this vehicle'}</span>`
+      : `<button data-signal="${escapeHtml(signal.name)}" data-selected="${isSelected}">${isSelected ? 'Remove' : 'Add'}</button>`;
+    return `<div class="list-row"><div class="meta"><b>${escapeHtml(signal.name)} ${isCore ? '<small>CORE</small>' : ''}</b><small>${escapeHtml(purpose)}</small></div>${control}</div>`;
   }).join('') : '<div class="empty">No matching signals.</div>';
+
   $('signal-list').querySelectorAll('button[data-signal]').forEach((button) => {
     button.onclick = async () => {
+      button.disabled = true;
       try {
         await postJson('/api/signals/select', { name: button.dataset.signal, selected: button.dataset.selected !== 'true' });
-        await loadSignals();
       } catch (error) { toast(error.message); }
+      await loadSignals();
     };
   });
 }
