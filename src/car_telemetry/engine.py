@@ -62,7 +62,6 @@ def run_engine(s=None):
             name='publisher',
         ),
         threading.Thread(target=oled_worker, args=(s, state, stop), daemon=True, name='oled'),
-        threading.Thread(target=mqtt_worker, args=(s, state, stop), daemon=True, name='mqtt'),
         threading.Thread(target=obd.run, args=(stop,), daemon=True, name='obd'),
         threading.Thread(
             target=system_worker,
@@ -76,6 +75,19 @@ def run_engine(s=None):
             name='internal-api',
         ),
     ]
+
+    # The cloud worker consumes only v2 device frames. Keep the former v1
+    # vehicle-topic publisher available for old deployments, but never start it
+    # in a new production installation unless explicitly requested.
+    if s.mqtt_legacy_enabled:
+        workers.append(
+            threading.Thread(
+                target=mqtt_worker,
+                args=(s, state, stop),
+                daemon=True,
+                name='mqtt-v1-legacy',
+            )
+        )
 
     for thread in workers:
         thread.start()

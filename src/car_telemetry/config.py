@@ -152,6 +152,7 @@ class Settings:
     bluetooth_scan_seconds: int
 
     mqtt_enabled: bool
+    mqtt_legacy_enabled: bool
     mqtt_host: str
     mqtt_port: int
     mqtt_client_id: str
@@ -261,6 +262,7 @@ def settings(explicit: str | None = None) -> Settings:
         web_fallback_poll_seconds=float(os.getenv("WEB_FALLBACK_POLL_SECONDS", "1")),
         bluetooth_scan_seconds=int(os.getenv("BLUETOOTH_SCAN_SECONDS", "10")),
         mqtt_enabled=_bool("MQTT_ENABLED", False),
+        mqtt_legacy_enabled=_bool("MQTT_LEGACY_ENABLED", False),
         mqtt_host=os.getenv("MQTT_HOST", "").strip(),
         mqtt_port=int(os.getenv("MQTT_PORT", "8883")),
         mqtt_client_id=os.getenv(

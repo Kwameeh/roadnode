@@ -320,6 +320,10 @@ def worker(
     now=None,
 ) -> None:
     """Drain the outbox until stopped, reconnecting with backoff."""
+    if not settings.mqtt_enabled or not settings.mqtt_host:
+        state.merge("publisher", {"enabled": False, "connected": False})
+        return
+
     clock = now or (lambda: datetime.now(timezone.utc))
     queue = outbox if outbox is not None else SqliteOutbox(settings.outbox_file)
     owns_queue = outbox is None

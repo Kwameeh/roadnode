@@ -12,6 +12,7 @@ CONFIG_KEYS = (
     'OLED_PAGE_SECONDS',
     'OLED_CONTRAST',
     'MQTT_ENABLED',
+    'MQTT_LEGACY_ENABLED',
     'MQTT_HOST',
     'MQTT_PORT',
     'MQTT_CLIENT_ID',
@@ -53,6 +54,7 @@ def test_realtime_oled_and_mqtt_defaults(monkeypatch, tmp_path):
     assert configured.web_heartbeat_seconds == 5
     assert configured.web_fallback_poll_seconds == 1
     assert configured.mqtt_enabled is False
+    assert configured.mqtt_legacy_enabled is False
     assert configured.mqtt_port == 8883
     assert configured.mqtt_tls is True
     assert configured.mqtt_publish_seconds == 3
@@ -77,6 +79,7 @@ def test_explicit_env_overrides_and_normalizes_cloud_configuration(monkeypatch, 
                 'OLED_PAGE_SECONDS=4.5',
                 'OLED_CONTRAST=999',
                 'MQTT_ENABLED=yes',
+                'MQTT_LEGACY_ENABLED=yes',
                 'MQTT_HOST=broker.example.test',
                 'MQTT_TLS=off',
                 'MQTT_PUBLISH_SECONDS=0.01',
@@ -99,6 +102,7 @@ def test_explicit_env_overrides_and_normalizes_cloud_configuration(monkeypatch, 
     assert configured.oled_page_seconds == 4.5
     assert configured.oled_contrast == 255
     assert configured.mqtt_enabled is True
+    assert configured.mqtt_legacy_enabled is True
     assert configured.mqtt_host == 'broker.example.test'
     assert configured.mqtt_tls is False
     assert configured.mqtt_publish_seconds == 0.2
