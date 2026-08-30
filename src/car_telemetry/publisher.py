@@ -9,8 +9,13 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
 from .config import Settings
-from .device_identity import DeviceCredential, assert_publish_allowed
-from .observations import parse_utc, utc_iso
+from .device_identity import (
+    CredentialError,
+    DeviceCredential,
+    assert_publish_allowed,
+    load_credential,
+)
+from .observations import parse_utc, utc_iso, utc_now
 from .outbox import OutboxItem, SqliteOutbox
 from .state import DeviceState
 
@@ -20,6 +25,33 @@ CONTENT_TYPE = "application/json"
 PAYLOAD_FORMAT_UTF8 = 1
 DEFAULT_REPLAY_AFTER_SECONDS = 5.0
 MAX_BACKOFF_SECONDS = 60.0
+
+
+def credential_from_settings(settings: Settings) -> DeviceCredential:
+    """Use the single telemetry.env credential, with JSON as legacy fallback.
+
+    MQTT_USERNAME and MQTT_PASSWORD already authenticate the legacy publisher.
+    Reusing them here keeps the production Pi configuration in one protected
+    file. Existing installations provisioned with a credential JSON continue
+    to work when both environment values are left empty.
+    """
+    username = settings.mqtt_username.strip()
+    password = settings.mqtt_password
+    if username and password:
+        return DeviceCredential(
+            device_id=settings.device_id,
+            username=username,
+            secret=password,
+            credential_version=1,
+            issued_at=utc_now(),
+            expires_at=None,
+            revoked_at=None,
+        )
+    if username or password:
+        raise CredentialError(
+            "MQTT_USERNAME and MQTT_PASSWORD must both be set in telemetry.env"
+        )
+    return load_credential(settings.device_credential_file)
 
 
 class PublishRejected(RuntimeError):
@@ -295,9 +327,7 @@ def worker(
     owns_transport = transport is None
 
     def build_transport() -> Transport:
-        from .device_identity import load_credential
-
-        resolved = credential or load_credential(settings.device_credential_file)
+        resolved = credential or credential_from_settings(settings)
         return PahoTransport(settings, resolved)
 
     backoff = 1.0
