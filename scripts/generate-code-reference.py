@@ -16,8 +16,8 @@ LANGUAGES = {
 
 
 def implementation_files():
-    paths = [ROOT / 'pyproject.toml']
-    for folder in ('.github', 'config', 'scripts', 'src', 'systemd', 'tests'):
+    paths = [ROOT / 'pyproject.toml', ROOT / 'config' / 'telemetry.env.example']
+    for folder in ('.github', 'scripts', 'src', 'systemd', 'tests'):
         paths.extend(path for path in (ROOT / folder).rglob('*') if path.is_file())
     return sorted(
         path

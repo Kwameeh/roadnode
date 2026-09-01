@@ -73,7 +73,7 @@ def test_device_may_publish_only_its_own_channels():
         "roadnode/v2/devices/DEV-001/#",               # multi-level wildcard
         "#",
         "roadnode/v2/devices/DEV-001/unknown",         # undeclared channel
-        "roadnode/v1/vehicles/VEH-001/telemetry",      # v1 namespace
+        "roadnode/v2/devices/DEV-002/frame",           # another device
         "",
     ],
 )

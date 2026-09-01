@@ -81,9 +81,75 @@ def worker(
             max_age_days=settings.imu_calibration_max_age_days,
         )
         state.merge("imu", {"calibrationState": calibration_state})
-        if calibration is None:
+    except Exception as exc:
+        state.merge(
+            "imu",
+            {
+                "calibrating": False,
+                "calibrated": False,
+                "calibrationState": "invalid",
+                "error": str(exc),
+            },
+        )
+        observations.update_imu_status(
+            {
+                "calibrationVersion": None,
+                "orientation": settings.imu_orientation,
+                "quality": "invalid",
+                "inactiveReason": "sensor_unavailable",
+            }
+        )
+        return
+
+    # A Pi may be bumped while its services start. Failed stationary
+    # calibration must not disable the IMU until the next reboot: keep retrying
+    # after a short settling period until the vehicle is still or we shut down.
+    retry_count = 0
+    while calibration is None and not stop.is_set():
+        state.merge(
+            "imu",
+            {
+                "calibrating": False,
+                "calibrated": False,
+                "calibrationState": calibration_state,
+                "calibrationRetryCount": retry_count,
+                "calibrationRetryInSeconds": settings.imu_calibration_settle_seconds,
+            },
+        )
+        if stop.wait(settings.imu_calibration_settle_seconds):
+            return
+        try:
             calibration = _calibrate(sensor, settings, state)
             calibration_state = "valid"
+        except Exception as exc:
+            retry_count += 1
+            calibration_state = "invalid"
+            state.merge(
+                "imu",
+                {
+                    "calibrating": False,
+                    "calibrated": False,
+                    "calibrationState": "invalid",
+                    "calibrationRetryCount": retry_count,
+                    "calibrationRetryInSeconds": settings.imu_calibration_retry_seconds,
+                    "error": str(exc),
+                },
+            )
+            observations.update_imu_status(
+                {
+                    "calibrationVersion": None,
+                    "orientation": settings.imu_orientation,
+                    "quality": "invalid",
+                    "inactiveReason": "calibration_invalid",
+                }
+            )
+            if stop.wait(settings.imu_calibration_retry_seconds):
+                return
+
+    if calibration is None:
+        return
+
+    try:
         state.merge(
             "imu",
             {
@@ -92,6 +158,8 @@ def worker(
                 "calibrationState": calibration_state,
                 "calibrationVersion": calibration.version,
                 "calibrationCreatedAt": calibration.created_at,
+                "calibrationRetryCount": retry_count,
+                "calibrationRetryInSeconds": None,
                 "error": None,
             },
         )

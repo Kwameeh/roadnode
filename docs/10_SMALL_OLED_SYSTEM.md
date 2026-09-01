@@ -9,7 +9,7 @@ Pages rotate every `OLED_PAGE_SECONDS` (three seconds by default):
 - Driving: large speed, RPM and coolant temperature
 - Location: GPS fix, satellites, heading and coordinates
 - Vehicle health: voltage, coolant, fuel and DTC count
-- Connectivity: OBD, GPS, LavinMQ, queue depth and the Pi address
+- Connectivity: OBD, GPS, EMQX, queue depth and the Pi address
 
 Impact and high-coolant warnings temporarily override the carousel. A one-pixel alternating offset reduces burn-in.
 

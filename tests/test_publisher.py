@@ -17,7 +17,7 @@ from car_telemetry.publisher import (
     prepare_for_send,
     should_replay,
 )
-from car_telemetry.device_identity import CredentialError, provision, save_credential
+from car_telemetry.device_identity import CredentialError
 
 BASE = datetime(2026, 3, 1, 12, 0, 0, tzinfo=timezone.utc)
 DEVICE = "DEV-001"
@@ -29,7 +29,6 @@ def test_v2_credential_comes_from_single_env_settings_file(tmp_path):
         device_id=DEVICE,
         mqtt_username="device-rn-0001",
         mqtt_password="admin-issued-secret",
-        device_credential_file=str(tmp_path / "does-not-exist.json"),
     )
 
     credential = credential_from_settings(configured)
@@ -44,25 +43,21 @@ def test_v2_credential_requires_both_env_values(tmp_path):
         device_id=DEVICE,
         mqtt_username="device-rn-0001",
         mqtt_password="",
-        device_credential_file=str(tmp_path / "unused.json"),
     )
 
     with pytest.raises(CredentialError, match="must both be set"):
         credential_from_settings(configured)
 
 
-def test_v2_credential_json_remains_a_backward_compatible_fallback(tmp_path):
-    path = tmp_path / "credential.json"
-    expected = provision(DEVICE)
-    save_credential(path, expected)
+def test_v2_credential_does_not_fall_back_to_another_file():
     configured = SimpleNamespace(
         device_id=DEVICE,
         mqtt_username="",
         mqtt_password="",
-        device_credential_file=str(path),
     )
 
-    assert credential_from_settings(configured) == expected
+    with pytest.raises(CredentialError, match="must both be set"):
+        credential_from_settings(configured)
 
 
 def iso(offset_seconds: float) -> str:

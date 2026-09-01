@@ -13,7 +13,6 @@ from .device_identity import (
     CredentialError,
     DeviceCredential,
     assert_publish_allowed,
-    load_credential,
 )
 from .observations import parse_utc, utc_iso, utc_now
 from .outbox import OutboxItem, SqliteOutbox
@@ -28,30 +27,22 @@ MAX_BACKOFF_SECONDS = 60.0
 
 
 def credential_from_settings(settings: Settings) -> DeviceCredential:
-    """Use the single telemetry.env credential, with JSON as legacy fallback.
-
-    MQTT_USERNAME and MQTT_PASSWORD already authenticate the legacy publisher.
-    Reusing them here keeps the production Pi configuration in one protected
-    file. Existing installations provisioned with a credential JSON continue
-    to work when both environment values are left empty.
-    """
+    """Build the v2 device credential from the single telemetry.env file."""
     username = settings.mqtt_username.strip()
     password = settings.mqtt_password
-    if username and password:
-        return DeviceCredential(
-            device_id=settings.device_id,
-            username=username,
-            secret=password,
-            credential_version=1,
-            issued_at=utc_now(),
-            expires_at=None,
-            revoked_at=None,
-        )
-    if username or password:
+    if not username or not password:
         raise CredentialError(
             "MQTT_USERNAME and MQTT_PASSWORD must both be set in telemetry.env"
         )
-    return load_credential(settings.device_credential_file)
+    return DeviceCredential(
+        device_id=settings.device_id,
+        username=username,
+        secret=password,
+        credential_version=1,
+        issued_at=utc_now(),
+        expires_at=None,
+        revoked_at=None,
+    )
 
 
 class PublishRejected(RuntimeError):
@@ -238,8 +229,6 @@ class PahoTransport:
         if settings.mqtt_tls:
             self._client.tls_set(
                 ca_certs=settings.mqtt_ca_cert or None,
-                certfile=settings.mqtt_client_cert or None,
-                keyfile=settings.mqtt_client_key or None,
                 cert_reqs=ssl.CERT_REQUIRED,
                 tls_version=ssl.PROTOCOL_TLS_CLIENT,
             )

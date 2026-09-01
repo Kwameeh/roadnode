@@ -9,7 +9,6 @@ from .config import settings
 from .frame_builder import worker as frame_worker
 from .gps import worker as gps_worker
 from .imu import worker as imu_worker
-from .mqtt_client import worker as mqtt_worker
 from .obd_service import OBDService
 from .outbox import SqliteOutbox
 from .publisher import worker as publisher_worker
@@ -75,19 +74,6 @@ def run_engine(s=None):
             name='internal-api',
         ),
     ]
-
-    # The cloud worker consumes only v2 device frames. Keep the former v1
-    # vehicle-topic publisher available for old deployments, but never start it
-    # in a new production installation unless explicitly requested.
-    if s.mqtt_legacy_enabled:
-        workers.append(
-            threading.Thread(
-                target=mqtt_worker,
-                args=(s, state, stop),
-                daemon=True,
-                name='mqtt-v1-legacy',
-            )
-        )
 
     for thread in workers:
         thread.start()

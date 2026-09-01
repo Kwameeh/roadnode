@@ -166,3 +166,55 @@ def test_imu_worker_reuses_persisted_calibration_and_emits_identity(monkeypatch,
     )
     assert snapshot.imu_status["calibrationVersion"] == calibration.version
     assert len(snapshot.imu_samples) == 1
+
+
+def test_imu_worker_retries_calibration_after_the_device_moves(monkeypatch, tmp_path):
+    calibration = build_calibration(
+        stationary_samples(), orientation="x-forward-y-left-z-up"
+    )
+
+    class Sensor:
+        acceleration = (0.12, -0.08, 9.90665)
+        gyro = (0.01, -0.02, 0.03)
+        temperature = 42.5
+
+    class StopAfterFirstSample:
+        stopped = False
+
+        def is_set(self):
+            return self.stopped
+
+        def wait(self, _timeout):
+            if attempts[0] >= 2:
+                self.stopped = True
+                return True
+            return False
+
+    attempts = [0]
+
+    def calibrate(_sensor, _settings, _state):
+        attempts[0] += 1
+        if attempts[0] == 1:
+            raise CalibrationError("device rotated during calibration")
+        return calibration
+
+    configured = replace(
+        settings(),
+        imu_enabled=True,
+        imu_calibration_file=str(tmp_path / "missing.json"),
+        imu_calibration_settle_seconds=0,
+        imu_calibration_retry_seconds=1,
+    )
+    monkeypatch.setattr(imu, "open_sensor", lambda _settings: Sensor())
+    monkeypatch.setattr(imu, "_calibrate", calibrate)
+    state = DeviceState("DEV-001", "VEH-001", 1)
+    observations = ObservationStore()
+
+    imu.worker(configured, state, observations, StopAfterFirstSample())
+
+    imu_state = state.snapshot()["imu"]
+    assert attempts[0] == 2
+    assert imu_state["calibrated"] is True
+    assert imu_state["calibrationState"] == "valid"
+    assert imu_state["calibrationRetryCount"] == 1
+    assert imu_state["error"] is None

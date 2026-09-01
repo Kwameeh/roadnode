@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,11 +14,6 @@ def _bool(name: str, default: bool) -> bool:
 
 def _int_auto(value: str) -> int:
     return int(value, 0)
-
-
-def _identifier(value: str) -> str:
-    token = re.sub(r"[^A-Za-z0-9_-]+", "-", value.strip()).strip("-")
-    return token or "unknown"
 
 
 def env_candidates(explicit: str | None = None) -> list[Path]:
@@ -106,6 +100,8 @@ class Settings:
     imu_orientation: str
     imu_calibration_file: str
     imu_calibration_max_age_days: int
+    imu_calibration_settle_seconds: float
+    imu_calibration_retry_seconds: float
     harsh_accel_mps2: float
     harsh_brake_mps2: float
     harsh_corner_mps2: float
@@ -152,25 +148,12 @@ class Settings:
     bluetooth_scan_seconds: int
 
     mqtt_enabled: bool
-    mqtt_legacy_enabled: bool
     mqtt_host: str
     mqtt_port: int
-    mqtt_client_id: str
-    mqtt_topic: str
-    mqtt_dtc_topic: str
-    mqtt_metadata_topic: str
-    mqtt_status_topic: str
     mqtt_username: str
     mqtt_password: str
     mqtt_tls: bool
     mqtt_ca_cert: str
-    mqtt_client_cert: str
-    mqtt_client_key: str
-    mqtt_publish_seconds: float
-    mqtt_buffer_seconds: float
-
-    device_credential_file: str
-
     outbox_file: str
     outbox_max_bytes: int
     outbox_max_age_seconds: int
@@ -190,8 +173,6 @@ def settings(explicit: str | None = None) -> Settings:
 
     vehicle_id = os.getenv("VEHICLE_ID", "VEH-001")
     device_id = os.getenv("DEVICE_ID", "PROTO-001")
-    topic_root = f"roadnode/v1/vehicles/{vehicle_id}"
-
     return Settings(
         device_id=device_id,
         vehicle_id=vehicle_id,
@@ -214,6 +195,12 @@ def settings(explicit: str | None = None) -> Settings:
         ),
         imu_calibration_max_age_days=max(
             1, int(os.getenv("IMU_CALIBRATION_MAX_AGE_DAYS", "90"))
+        ),
+        imu_calibration_settle_seconds=max(
+            0.0, float(os.getenv("IMU_CALIBRATION_SETTLE_SECONDS", "2"))
+        ),
+        imu_calibration_retry_seconds=max(
+            1.0, float(os.getenv("IMU_CALIBRATION_RETRY_SECONDS", "5"))
         ),
         harsh_accel_mps2=float(os.getenv("HARSH_ACCEL_MPS2", "3.0")),
         harsh_brake_mps2=float(os.getenv("HARSH_BRAKE_MPS2", "-3.0")),
@@ -262,30 +249,12 @@ def settings(explicit: str | None = None) -> Settings:
         web_fallback_poll_seconds=float(os.getenv("WEB_FALLBACK_POLL_SECONDS", "1")),
         bluetooth_scan_seconds=int(os.getenv("BLUETOOTH_SCAN_SECONDS", "10")),
         mqtt_enabled=_bool("MQTT_ENABLED", False),
-        mqtt_legacy_enabled=_bool("MQTT_LEGACY_ENABLED", False),
         mqtt_host=os.getenv("MQTT_HOST", "").strip(),
         mqtt_port=int(os.getenv("MQTT_PORT", "8883")),
-        mqtt_client_id=os.getenv(
-            "MQTT_CLIENT_ID", f"roadnode-pi-{_identifier(device_id)}"
-        ).strip(),
-        mqtt_topic=os.getenv("MQTT_TOPIC", f"{topic_root}/telemetry"),
-        mqtt_dtc_topic=os.getenv("MQTT_DTC_TOPIC", f"{topic_root}/dtc"),
-        mqtt_metadata_topic=os.getenv("MQTT_METADATA_TOPIC", f"{topic_root}/metadata"),
-        mqtt_status_topic=os.getenv("MQTT_STATUS_TOPIC", f"{topic_root}/status"),
         mqtt_username=os.getenv("MQTT_USERNAME", ""),
         mqtt_password=os.getenv("MQTT_PASSWORD", ""),
         mqtt_tls=_bool("MQTT_TLS", True),
         mqtt_ca_cert=os.path.expanduser(os.getenv("MQTT_CA_CERT", "")),
-        mqtt_client_cert=os.path.expanduser(os.getenv("MQTT_CLIENT_CERT", "")),
-        mqtt_client_key=os.path.expanduser(os.getenv("MQTT_CLIENT_KEY", "")),
-        mqtt_publish_seconds=max(0.2, float(os.getenv("MQTT_PUBLISH_SECONDS", "3"))),
-        mqtt_buffer_seconds=max(1.0, float(os.getenv("MQTT_BUFFER_SECONDS", "60"))),
-        device_credential_file=os.path.expanduser(
-            os.getenv(
-                "DEVICE_CREDENTIAL_FILE",
-                "~/.local/share/car-telemetry/device-credential.json",
-            )
-        ),
         outbox_file=os.path.expanduser(
             os.getenv("OUTBOX_FILE", "~/.local/share/car-telemetry/outbox.sqlite3")
         ),

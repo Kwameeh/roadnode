@@ -1,31 +1,50 @@
-# LavinMQ MQTT and Cloud Ingestion
+# EMQX MQTT and Cloud Ingestion
 
-The Pi publishes MQTT 3.1.1 messages to a CloudAMQP-hosted LavinMQ instance. Copy the exact hostname, MQTT port, username, password and TLS settings from CloudAMQP's **MQTT Details** panel. Credentials belong only in the ignored `config/telemetry.env` file.
+RoadNode Edge has one MQTT implementation: MQTT 5 over TLS to the production
+EMQX broker. All settings and credentials come from `config/telemetry.env`.
 
-## Client identities
+## Connection
 
-Each simultaneous client needs a distinct ID. Recommended values:
+```text
+Host: mqtt.obd2.ragnogroup.com
+Port: 8883
+TLS: required
+CA: /etc/roadnode/mqtt-ca.crt
+Authentication: per-device username/password
+Client ID: DEVICE_ID
+```
 
-- Pi publisher: `roadnode-pi-PROTO-001`
-- Cloud/MongoDB ingestor: `roadnode-ingestor-prod-01`
+Install the CA with `./scripts/install-cloud-mqtt-ca.sh`. Cloudflare must keep
+the MQTT hostname DNS-only. The application does not fall back to plaintext,
+v1 vehicle topics, or a separate credential JSON file.
 
-The ingestor should use a stable client ID, QoS 1 subscriptions and `clean_session=false`. LavinMQ can then retain its session while the server is temporarily offline. Do not connect browsers directly to MQTT; doing so exposes credentials and consumes another delivery for every message.
+## Topic and payload
 
-## Topics
+Each device publishes only to:
 
-- `roadnode/v1/vehicles/{vehicleId}/telemetry` — QoS 1, not retained
-- `roadnode/v1/vehicles/{vehicleId}/metadata` — QoS 1, retained
-- `roadnode/v1/vehicles/{vehicleId}/dtc` — QoS 1, not retained
-- `roadnode/v1/vehicles/{vehicleId}/status` — QoS 1, retained, with an offline last will
+```text
+roadnode/v2/devices/{DEVICE_ID}/frame
+```
 
-Every payload includes `schemaVersion`, `messageId`, `messageType`, `deviceId`, `vehicleId`, `sessionId`, `sequence`, `capturedAt` and `sentAt`. The cloud ingestor should create a unique MongoDB index on `messageId`, add its own `receivedAt`, and use `capturedAt` when ordering replayed data.
+Frames use QoS 1, are not retained, and carry MQTT 5 JSON content properties.
+Each frame includes a stable `messageId`, `deviceId`, `bootId`, sequence,
+capture/send time, replay flag, dropped-message counters, telemetry, and IMU
+samples. EMQX authorization should deny subscriptions and restrict publishing
+to that device's own namespace.
 
-Telemetry contains current GPS, IMU, watched OBD values, DTC state, driver events and device health. Metadata is published only when it changes. DTC events use their original capture time. Status reports clean and unexpected disconnects.
+The cloud worker subscribes to `roadnode/v2/devices/+/+`, validates each frame,
+and writes it to MongoDB idempotently by `messageId`.
 
 ## Offline behavior
 
-The Pi keeps at most 60 seconds of messages in RAM. It drains the oldest messages first after reconnecting, removes each QoS 1 item only after the broker acknowledges it, and records any dropped-message count in local state. The queue is never written to disk and disappears on reboot.
+Frames are written to the SQLite outbox before publishing. A row is deleted
+only after MQTT PUBACK. After an outage, the publisher reconnects with backoff,
+replays the oldest frames first, preserves their identity and capture time, and
+marks them as replayed. Default retention is 256 MiB or 24 hours.
 
-## Free-plan quota
+## Healthy status
 
-CloudAMQP's free Loyal Lemming plan currently allows two million counted messages per month. Both publication and subscriber delivery count. At one telemetry message every three seconds and one subscriber, a 30-day month uses about 1.728 million counted messages before low-volume status, metadata, DTC and retry traffic. Use one MQTT ingestor and fan remote dashboards out from that server.
+`telemetry status` should show `publisher.connected=true`, an increasing
+`publisher.published`, and a falling `frame.queueDepth` after reconnecting.
+EMQX should show the device UUID as the client ID and the Admin-created device
+username as the authenticated user.

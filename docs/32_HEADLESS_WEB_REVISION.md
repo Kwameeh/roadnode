@@ -12,7 +12,7 @@ Major changes:
 - VIN collected at vehicle connection when available
 - automatic periodic stored/current/freeze-frame DTC collection
 - DTC add/remove/clear event history
-- versioned LavinMQ telemetry, vehicle metadata, DTC event and retained status topics
+- durable MQTT v2 frames published through EMQX with QoS 1
 - system CPU/RAM/temperature/disk monitoring in the web app
 - performance benchmark changed from touchscreen rendering to multiple simulated web clients
 - Raspberry Pi OS Lite/headless deployment recommended
