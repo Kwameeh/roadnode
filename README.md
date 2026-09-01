@@ -27,6 +27,10 @@ proxy raw MQTT on port 8883.
 
 ## 1. Prepare the cloud records in the Admin UI
 
+For the complete operator workflow, including the one-time worker rule and
+boundary-by-boundary checks, use the
+[New Device Setup Runbook](../docs/platform/NEW_DEVICE_SETUP.md).
+
 1. Sign in to <https://admin.obd2.ragnogroup.com>.
 2. Open **Vehicles**, click **Create vehicle**, and create `VEH-001`.
 3. Open **Devices**, click **Create device**, and enter the Pi's serial number.
@@ -38,8 +42,10 @@ proxy raw MQTT on port 8883.
    current start time and a reason, preview the assignment, then confirm it.
 6. In the EMQX dashboard, create a password-authentication user whose username
    and password exactly match the Admin values.
-7. Give that user publish permission only for
-   `roadnode/v2/devices/{DEVICE_ID}/+` and deny all other device namespaces.
+7. Under Authorization -> Built-in Database -> Permissions -> Client ID, give
+   the exact device UUID publish-only permission for
+   `roadnode/v2/devices/{DEVICE_ID}/frame`, QoS 1, retain false. Do not give a
+   device Subscribe permission.
 
 The current checked-in example already contains:
 
