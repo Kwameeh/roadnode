@@ -54,9 +54,6 @@ def test_reprovisioning_the_same_device_still_changes_the_secret():
 def test_device_may_publish_only_its_own_channels():
     assert allowed_publish_topics("DEV-001") == (
         "roadnode/v2/devices/DEV-001/frame",
-        "roadnode/v2/devices/DEV-001/metadata",
-        "roadnode/v2/devices/DEV-001/dtc",
-        "roadnode/v2/devices/DEV-001/status",
     )
     for topic in allowed_publish_topics("DEV-001"):
         assert authorize_publish("DEV-001", topic) is True
@@ -93,12 +90,12 @@ def test_generated_broker_acl_matches_the_device_side_model():
     acl = render_emqx_acl(["DEV-001", "DEV-002"])
 
     for topic in allowed_publish_topics("DEV-001"):
-        assert f'{{allow, {{user, "DEV-001"}}, publish, ["{topic}"]}}.' in acl
-    assert '{deny, {user, "DEV-001"}, subscribe, ["#"]}.' in acl
-    assert '{deny, {user, "DEV-002"}, subscribe, ["#"]}.' in acl
+        assert f'{{allow, {{clientid, "DEV-001"}}, publish, ["{topic}"]}}.' in acl
+    assert '{deny, {clientid, "DEV-001"}, subscribe, ["#"]}.' in acl
+    assert '{deny, {clientid, "DEV-002"}, subscribe, ["#"]}.' in acl
     assert acl.strip().endswith("{deny, all}.")
     # DEV-001 must never be granted DEV-002's topics.
-    assert '{allow, {user, "DEV-001"}, publish, ["roadnode/v2/devices/DEV-002/frame"]}.' not in acl
+    assert '{allow, {clientid, "DEV-001"}, publish, ["roadnode/v2/devices/DEV-002/frame"]}.' not in acl
 
 
 # --- rotation ---------------------------------------------------------------
