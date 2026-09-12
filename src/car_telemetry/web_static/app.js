@@ -8,6 +8,11 @@ let reconnectAttempt = 0;
 let lastLiveMessageAt = 0;
 let heartbeatSeconds = 5;
 let fallbackPollSeconds = 1;
+let wifiNetworks = [];
+let selectedWifi = null;
+let wifiBusy = false;
+let networkPollBusy = false;
+let wifiConnecting = false;
 
 function toast(message) {
   const el = $('toast');
@@ -128,11 +133,15 @@ function renderDtcList(id, items) {
     : '<div class="empty">None</div>';
 }
 
-async function getJson(url) {
-  const response = await fetch(url, { cache: 'no-store' });
-  const body = await response.json();
-  if (!response.ok) throw new Error(body.detail || body.error || response.statusText);
-  return body;
+async function getJson(url, timeoutMs = 0) {
+  const controller = new AbortController();
+  const timer = timeoutMs ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  try {
+    const response = await fetch(url, { cache: 'no-store', signal: controller.signal });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.detail || body.error || response.statusText);
+    return body;
+  } finally { if (timer) clearTimeout(timer); }
 }
 
 async function postJson(url, body = {}) {
@@ -188,12 +197,128 @@ function renderSignals(data) {
 }
 
 async function loadSetup() {
+  loadNetworkStatus();
   try {
     const [ports, bluetooth] = await Promise.all([getJson('/api/obd/ports'), getJson('/api/bluetooth/status')]);
     $('port-info').textContent = `Mode: ${ports.mode}\nSelected: ${ports.selected?.kind || 'none'} ${ports.selected?.port || ''}\nUSB: ${(ports.usb || []).join(', ') || 'none'}\nBluetooth serial: ${ports.bluetoothPort}`;
     document.querySelectorAll('.transport-button').forEach((button) => button.classList.toggle('active', button.dataset.transport === ports.mode));
     renderBluetooth(bluetooth);
   } catch (error) { toast(error.message); }
+}
+
+function wifiMessage(message) {
+  $('wifi-message').textContent = message;
+}
+
+function updateWifiControls() {
+  const busy = wifiBusy || wifiConnecting;
+  $('scan-wifi').disabled = busy;
+  $('connect-wifi').disabled = busy;
+  $('wifi-list').querySelectorAll('button').forEach((button) => {
+    const network = wifiNetworks[Number(button.dataset.network)];
+    button.disabled = busy || network.connected || !network.supported;
+  });
+}
+
+function renderWifiNetworks() {
+  $('wifi-list').innerHTML = wifiNetworks.length ? wifiNetworks.map((network, index) => `
+    <div class="list-row"><div class="meta">
+      <b>${escapeHtml(network.ssid)}</b>
+      <small>${network.signal}% signal · ${escapeHtml(network.security || 'Open network')} · ${escapeHtml(network.interface)}</small>
+    </div><button type="button" data-network="${index}">${network.connected ? 'Connected' : network.supported ? 'Select' : 'Unsupported'}</button></div>
+  `).join('') : '<div class="empty">No networks found. Check that the hotspot is nearby and Wi-Fi is enabled on the Pi.</div>';
+  $('wifi-list').querySelectorAll('button').forEach((button) => {
+    button.onclick = () => {
+      selectedWifi = wifiNetworks[Number(button.dataset.network)];
+      $('wifi-selection').textContent = `Connect to ${selectedWifi.ssid}`;
+      $('wifi-password').value = '';
+      $('wifi-password').disabled = !selectedWifi.security;
+      $('wifi-password-help').textContent = selectedWifi.security
+        ? 'Leave blank to use a password already saved on the Pi.' : 'This is an open network. No password is needed.';
+      $('wifi-form').hidden = false;
+      (selectedWifi.security ? $('wifi-password') : $('connect-wifi')).focus();
+    };
+  });
+  updateWifiControls();
+}
+
+async function loadNetworkStatus() {
+  if (networkPollBusy) return;
+  networkPollBusy = true;
+  try {
+    const data = await getJson('/api/network/status', 30000);
+    const labels = { online: 'Online', offline: 'No internet', limited: 'Limited access', unknown: 'Unknown' };
+    const label = labels[data.internet] || 'Unknown';
+    $('badge-internet').textContent = `Internet: ${label}`;
+    badge('badge-internet', data.internet === 'online', data.internet !== 'online');
+    const wifi = (data.wifi || []).map((network) => network.ssid).join(', ');
+    $('network-status').textContent = `Internet: ${label}. Wi-Fi: ${wifi || (data.wifiEnabled ? 'Not connected' : 'Off')}.${data.error ? ` ${data.error}` : ''}`;
+    $('network-addresses').textContent = (data.interfaces || []).map((item) =>
+      `${item.interface}: ${item.state}${item.addresses.length ? ` · ${item.addresses.join(', ')}` : ''}`
+    ).join('\n');
+    const operation = data.operation || {};
+    // A status request started before submission may still report an idle job.
+    if (!wifiBusy) {
+      wifiConnecting = operation.state === 'connecting';
+      if (wifiConnecting) wifiMessage(`Connecting to ${operation.ssid}... This page may disconnect while the Pi changes networks.`);
+      else if (operation.state === 'failed') wifiMessage(operation.error || 'Connection failed. Check the password and try again.');
+      else if (operation.state === 'connected') wifiMessage(`Connection attempt to ${operation.ssid} completed. Internet: ${label}.`);
+    }
+    if (wifiNetworks.length) {
+      wifiNetworks.forEach((network) => {
+        network.connected = (data.wifi || []).some((active) => active.ssid === network.ssid && active.interface === network.interface);
+      });
+      renderWifiNetworks();
+    }
+    updateWifiControls();
+  } catch {
+    $('badge-internet').textContent = 'Internet: unknown';
+    badge('badge-internet', false, true);
+    $('network-status').textContent = 'Cannot reach the Pi. Internet status is unknown. If Wi-Fi changed, join the new network and reopen the Pi web page.';
+  } finally { networkPollBusy = false; }
+}
+
+function initWifi() {
+  $('scan-wifi').onclick = async () => {
+    wifiBusy = true;
+    updateWifiControls();
+    wifiMessage('Scanning for Wi-Fi networks...');
+    try {
+      const data = await postJson('/api/network/scan');
+      wifiNetworks = data.networks || [];
+      renderWifiNetworks();
+      wifiMessage(`${wifiNetworks.length} networks found. Select a network to connect. Enterprise and WEP networks require setup on the Pi.`);
+    } catch (error) { wifiMessage(error.message); }
+    finally { wifiBusy = false; updateWifiControls(); }
+  };
+  $('cancel-wifi').onclick = () => {
+    $('wifi-form').hidden = true;
+    $('wifi-password').value = '';
+    selectedWifi = null;
+  };
+  $('wifi-form').onsubmit = async (event) => {
+    event.preventDefault();
+    if (!selectedWifi || wifiBusy || wifiConnecting) return;
+    wifiBusy = true;
+    updateWifiControls();
+    wifiMessage(`Connecting to ${selectedWifi.ssid}... If this page disconnects, join that network and reopen the Pi web page.`);
+    const body = { ssid: selectedWifi.ssid, interface: selectedWifi.interface, password: $('wifi-password').value };
+    $('wifi-password').value = '';
+    try {
+      await postJson('/api/network/connect', body);
+      wifiConnecting = true;
+      $('wifi-form').hidden = true;
+    } catch (error) {
+      wifiMessage(`${error.message}. If the Pi changed networks, reconnect to it and check status before retrying.`);
+    } finally {
+      body.password = '';
+      wifiBusy = false;
+      updateWifiControls();
+      loadNetworkStatus();
+    }
+  };
+  loadNetworkStatus();
+  setInterval(loadNetworkStatus, 10000);
 }
 
 function renderBluetooth(data) {
@@ -299,7 +424,7 @@ function watchStream() {
 }
 
 async function initialize() {
-  initTabs(); initActions();
+  initTabs(); initActions(); initWifi();
   try {
     const config = await getJson('/api/web-config');
     heartbeatSeconds = Number(config.heartbeatSeconds) || 5;

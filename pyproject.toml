@@ -14,6 +14,7 @@ dependencies = [
   "paho-mqtt>=2,<3",
   "pexpect>=4.9,<5",
   "fastapi>=0.116,<1",
+  "pydantic>=2,<3",
   "uvicorn>=0.35,<1",
   "adafruit-blinka>=8",
   "adafruit-circuitpython-mpu6050>=1.2",

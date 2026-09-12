@@ -31,6 +31,7 @@ sudo raspi-config nonint do_i2c 0 || true
 sudo raspi-config nonint do_serial_hw 0 || true
 sudo raspi-config nonint do_serial_cons 1 || true
 sudo usermod -aG dialout,i2c,bluetooth "$USER_NAME"
+bash "$PROJECT_DIR/scripts/setup-network.sh" "$USER_NAME"
 
 python3 -m venv --system-site-packages "$PROJECT_DIR/.venv"
 "$PROJECT_DIR/.venv/bin/pip" install --upgrade pip setuptools wheel
