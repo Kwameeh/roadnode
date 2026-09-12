@@ -178,6 +178,39 @@ shown above.
 
 ## Useful commands
 
+### Wi-Fi from the Pi web page
+
+Open the local page shown by `telemetry web-url`, then go to **Setup → Wi-Fi &
+Internet**. Choose **Scan networks**, select a network or phone hotspot, enter
+its password, and choose **Connect**. Signal strength, security, the current
+Wi-Fi network, interface addresses, and internet status appear on the page.
+The internet badge refreshes every 10 seconds, independently of the cloud/MQTT
+connection. Saved NetworkManager credentials can be reused by leaving the
+password blank. Open and WPA personal networks are supported; enterprise and
+WEP networks must be configured on the Pi.
+Scanning turns the Wi-Fi radio on if it was disabled in software.
+
+The connection continues on the Pi if the browser disconnects during a network
+switch. Join the new network on your phone/laptop and reopen the Pi's hostname
+(for example `http://raspberrypi.local:8080`, using your configured web port) or
+its new IP address. You must already be able to reach the local web page to use
+these controls; this does not create a setup hotspot.
+
+This feature requires NetworkManager to manage the Pi's wireless interface.
+Install and update scripts install `network-manager` and `polkitd` and grant the
+web service user the required NetworkManager permissions through the
+`roadnode-network` group. Existing installs should run `./scripts/update.sh`.
+Systems still using legacy `dhcpcd`/`wpa_supplicant` need migration to
+NetworkManager locally before these controls work.
+
+Internet status verifies an HTTPS 204 response from
+`https://connectivitycheck.gstatic.com/generate_204`. A failed check shows **No
+internet**, including when that endpoint is blocked; a non-204 response shows
+**Limited access**. Wi-Fi association alone never marks the Pi online.
+Passwords are passed to `nmcli` through standard input, excluded from API
+responses, and saved by NetworkManager. The local web app is intended for a
+trusted LAN; anyone who can access it can manage the Pi's connections.
+
 ```bash
 telemetry status
 telemetry web-url

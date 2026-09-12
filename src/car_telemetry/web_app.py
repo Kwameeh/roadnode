@@ -6,19 +6,23 @@ import time
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import uvicorn
-from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel, Field, field_validator
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .common import read_json
 from .config import settings
 from .engine_client import EngineAPI
+from .network import NetworkError, NetworkManager
 
 S = settings()
 ENGINE = EngineAPI(S.api_host, S.api_port)
 STATIC_DIR = Path(__file__).with_name('web_static')
+NETWORK = NetworkManager()
 
 
 class TelemetryHub:
@@ -144,6 +148,70 @@ def signals():
         return ENGINE.get('/signals')
     except RuntimeError as exc:
         raise HTTPException(503, str(exc))
+
+
+class WifiConnection(BaseModel):
+    ssid: str = Field(strict=True, min_length=1, max_length=32)
+    interface: str = Field(strict=True, min_length=1, max_length=15, pattern=r'^[a-zA-Z0-9_.-]+$')
+    password: str = Field(default='', strict=True, max_length=64, repr=False)
+
+    @field_validator('ssid', 'interface', 'password')
+    @classmethod
+    def safe_text(cls, value: str) -> str:
+        if any(ord(char) < 32 or ord(char) == 127 for char in value):
+            raise ValueError('Control characters are not allowed')
+        return value
+
+    @field_validator('ssid')
+    @classmethod
+    def ssid_bytes(cls, value: str) -> str:
+        if len(value.encode('utf-8')) > 32:
+            raise ValueError('Network name must fit in 32 bytes')
+        return value
+
+
+def local_network_request(request: Request):
+    origin = request.headers.get('origin')
+    try:
+        parsed_origin = urlsplit(origin) if origin else None
+    except ValueError:
+        raise HTTPException(403, 'Use the Pi web page to manage Wi-Fi.') from None
+    if (request.headers.get('sec-fetch-site') == 'cross-site' or
+            (parsed_origin and (parsed_origin.netloc != request.url.netloc or
+                                parsed_origin.scheme != request.url.scheme))):
+        raise HTTPException(403, 'Use the Pi web page to manage Wi-Fi.')
+    if request.headers.get('content-type', '').split(';')[0].strip() != 'application/json':
+        raise HTTPException(415, 'Send an application/json request.')
+
+
+@app.get('/api/network/status')
+def network_status():
+    return NETWORK.status()
+
+
+@app.post('/api/network/scan')
+def network_scan(request: Request):
+    local_network_request(request)
+    try:
+        return NETWORK.scan()
+    except NetworkError as exc:
+        raise HTTPException(409, str(exc)) from None
+
+
+@app.post('/api/network/connect', status_code=202)
+async def network_connect(request: Request, background_tasks: BackgroundTasks):
+    local_network_request(request)
+    # Sanitize validation errors: FastAPI's default errors echo invalid passwords.
+    try:
+        payload = WifiConnection.model_validate(await request.json())
+    except (ValueError, TypeError):
+        raise HTTPException(422, 'Provide a valid network name, Wi-Fi interface, and password.') from None
+    try:
+        operation = NETWORK.reserve_connect(payload.ssid, payload.interface)
+    except NetworkError as exc:
+        raise HTTPException(409, str(exc)) from None
+    background_tasks.add_task(NETWORK.connect, payload.ssid, payload.interface, payload.password)
+    return {'operation': operation}
 
 
 @app.get('/api/vehicle')

@@ -17,6 +17,7 @@
       <span id="badge-gps" class="badge">GPS</span>
       <span id="badge-obd" class="badge">OBD</span>
       <span id="badge-mqtt" class="badge">Cloud</span>
+      <span id="badge-internet" class="badge">Internet: checking</span>
     </div>
   </header>
 
@@ -81,6 +82,27 @@
     </section>
 
     <section id="tab-setup" class="tab">
+      <div class="card wifi-card">
+        <div class="section-head">
+          <div><h2>Wi-Fi &amp; Internet</h2><p>Connect the Raspberry Pi to a nearby Wi-Fi network or phone hotspot.</p></div>
+          <button id="scan-wifi" type="button">Scan networks</button>
+        </div>
+        <div id="network-status" class="small" aria-live="polite">Checking the Pi's internet connection...</div>
+        <div id="network-addresses" class="mono small"></div>
+        <p class="small">Switching Wi-Fi can disconnect this page. Join the same network on your phone or laptop, then reopen the Pi's hostname or new IP address.</p>
+        <div id="wifi-message" class="small" role="status" aria-live="polite"></div>
+        <div id="wifi-list" class="list"><div class="empty">Scan to find available networks.</div></div>
+        <form id="wifi-form" hidden>
+          <h3 id="wifi-selection"></h3>
+          <label for="wifi-password">Wi-Fi password</label>
+          <input id="wifi-password" type="password" autocomplete="new-password" maxlength="64" aria-describedby="wifi-password-help" />
+          <p id="wifi-password-help" class="small">Leave blank to use a password already saved on the Pi.</p>
+          <div class="button-row">
+            <button id="connect-wifi" type="submit">Connect</button>
+            <button id="cancel-wifi" type="button">Cancel</button>
+          </div>
+        </form>
+      </div>
       <div class="card">
         <h2>OBD Connection</h2>
         <p>Auto mode prefers USB ELM327 and falls back to Bluetooth RFCOMM.</p>
@@ -125,6 +147,6 @@
   </main>
 
   <div id="toast" class="toast"></div>
-  <script src="/static/app.js?v=4"></script>
+  <script src="/static/app.js?v=5"></script>
 </body>
 </html>
