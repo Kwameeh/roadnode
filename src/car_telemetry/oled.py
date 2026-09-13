@@ -12,7 +12,7 @@ from PIL import Image, ImageDraw, ImageFont
 from .config import Settings
 from .state import DeviceState
 
-PAGES = ('drive', 'location', 'health', 'connectivity')
+PAGES = ('access', 'drive', 'location', 'health', 'connectivity')
 
 
 def _font(size: int, bold: bool = False):
@@ -51,6 +51,14 @@ def _center(draw: ImageDraw.ImageDraw, text: str, y: int, font, width: int, fill
     draw.text(((width - (box[2] - box[0])) // 2, y), text, font=font, fill=fill)
 
 
+def _fit(draw: ImageDraw.ImageDraw, text: str, font, width: int) -> str:
+    if draw.textlength(text, font=font) <= width:
+        return text
+    while text and draw.textlength(text + '..', font=font) > width:
+        text = text[:-1]
+    return text + '..'
+
+
 def _header(draw: ImageDraw.ImageDraw, title: str, snapshot: dict, width: int, shift: int):
     obd = snapshot.get('obd', {})
     gps = snapshot.get('gps', {})
@@ -75,7 +83,14 @@ def _alert(snapshot: dict) -> tuple[str, str] | None:
     return None
 
 
-def render_frame(snapshot: dict, page: str, width: int = 128, height: int = 64, shift: int = 0) -> Image.Image:
+def render_frame(
+    snapshot: dict,
+    page: str,
+    width: int = 128,
+    height: int = 64,
+    shift: int = 0,
+    web_port: int = 8080,
+) -> Image.Image:
     image = Image.new('1', (width, height))
     draw = ImageDraw.Draw(image)
     shift = max(0, min(1, shift))
@@ -92,6 +107,20 @@ def render_frame(snapshot: dict, page: str, width: int = 128, height: int = 64, 
     mqtt = snapshot.get('mqtt', {})
     system = snapshot.get('system', {})
     signals = obd.get('signals', {})
+
+    if page == 'access':
+        _header(draw, 'WEB APP', snapshot, width, shift)
+        ip = system.get('ipAddress')
+        hostname = system.get('hostname') or socket.gethostname()
+        lines = (
+            f'{ip}:{web_port}' if ip else 'NO NETWORK',
+            f'{hostname}.local:{web_port}',
+            f"WiFi {system.get('wifiSsid') or '--'}",
+            f"BT   {system.get('bluetoothDevice') or '--'}",
+        )
+        for index, text in enumerate(lines):
+            draw.text((shift, 14 + index * 12), _fit(draw, text, SMALL_FONT, width - shift), font=SMALL_FONT, fill=255)
+        return image
 
     if page == 'drive':
         _header(draw, 'DRIVE', snapshot, width, shift)
@@ -210,14 +239,21 @@ def worker(settings: Settings, state: DeviceState, stop: threading.Event):
                     continue
 
                 elapsed = max(0.0, time.monotonic() - started)
-                page = PAGES[int(elapsed / max(1.0, settings.oled_page_seconds)) % len(PAGES)]
+                page_seconds = max(1.0, settings.oled_page_seconds)
+                if elapsed < settings.oled_access_seconds:
+                    # Boot: keep the web app address and links up long enough to read.
+                    page = 'access'
+                else:
+                    carousel = elapsed - settings.oled_access_seconds
+                    page = PAGES[int(carousel / page_seconds) % len(PAGES)]
                 snapshot = state.snapshot()
                 frame = render_frame(
                     snapshot,
                     page,
                     settings.oled_width,
                     settings.oled_height,
-                    shift=int(elapsed / max(1.0, settings.oled_page_seconds)) % 2,
+                    shift=int(elapsed / page_seconds) % 2,
+                    web_port=settings.web_port,
                 )
                 oled.show(frame)
                 state.merge(
@@ -270,14 +306,23 @@ def test_display(settings: Settings, driver: str | None = None, seconds: float =
         },
         'gps': {'validFix': True, 'satellites': 9, 'headingDegrees': 241, 'latitude': 5.6037, 'longitude': -0.1870},
         'mqtt': {'connected': True, 'bufferedMessages': 0},
-        'system': {'ipAddress': '192.168.1.42'},
+        'system': {
+            'ipAddress': '192.168.1.42',
+            'hostname': socket.gethostname(),
+            'wifiSsid': 'RoadNode-WiFi',
+            'bluetoothDevice': 'OBDII',
+        },
         'events': {},
     }
     try:
         oled.show(splash_frame(selected.oled_width, selected.oled_height, selected.device_id))
         time.sleep(min(2.0, max(0.2, seconds)))
         for index, page in enumerate(PAGES):
-            oled.show(render_frame(sample, page, selected.oled_width, selected.oled_height, index % 2))
+            oled.show(
+                render_frame(
+                    sample, page, selected.oled_width, selected.oled_height, index % 2, selected.web_port
+                )
+            )
             time.sleep(max(0.2, seconds))
     finally:
         oled.clear()

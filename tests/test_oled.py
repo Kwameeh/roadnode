@@ -28,7 +28,12 @@ def sample_state():
             'longitude': -0.1870,
         },
         'mqtt': {'connected': True, 'bufferedMessages': 0},
-        'system': {'ipAddress': '192.168.1.42'},
+        'system': {
+            'ipAddress': '192.168.1.42',
+            'hostname': 'roadnode',
+            'wifiSsid': 'Home WiFi',
+            'bluetoothDevice': 'OBDII',
+        },
         'events': {},
     }
 
@@ -52,7 +57,32 @@ def test_oled_handles_missing_vehicle_and_gps_data():
     state = {'obd': {}, 'gps': {}, 'mqtt': {}, 'system': {}, 'events': {}}
     assert render_frame(state, 'drive').getbbox() is not None
     assert render_frame(state, 'location').getbbox() is not None
+    assert render_frame(state, 'access').getbbox() is not None
     assert splash_frame(128, 64, 'PROTO-001').getbbox() is not None
+
+
+def test_access_page_reflects_port_and_links_and_stays_on_screen():
+    state = sample_state()
+    base = render_frame(state, 'access', web_port=8080)
+    assert render_frame(state, 'access', web_port=9090).tobytes() != base.tobytes()
+    state['system']['wifiSsid'] = None
+    assert render_frame(state, 'access', web_port=8080).tobytes() != base.tobytes()
+
+    state = sample_state()
+    state['system']['hostname'] = 'a-very-long-roadnode-hostname-for-testing'
+    state['system']['wifiSsid'] = 'An Extremely Long Wireless Network Name'
+    frame = render_frame(state, 'access')
+    assert frame.getbbox()[2] <= 128
+
+
+def test_fit_truncates_to_width():
+    from PIL import Image, ImageDraw
+
+    draw = ImageDraw.Draw(Image.new('1', (128, 64)))
+    assert oled._fit(draw, 'short', oled.SMALL_FONT, 128) == 'short'
+    fitted = oled._fit(draw, 'x' * 80, oled.SMALL_FONT, 128)
+    assert fitted.endswith('..')
+    assert draw.textlength(fitted, font=oled.SMALL_FONT) <= 128
 
 
 class ControlledStop:
@@ -125,6 +155,34 @@ def test_oled_worker_retries_transient_failure_updates_state_and_clears(monkeypa
     assert oled_state['page'] in PAGES
     assert oled_state['error'] is None
     assert oled_state['lastFrameAt']
+
+
+def test_oled_worker_holds_access_page_after_splash(monkeypatch):
+    rendered = []
+
+    class RecordingDisplay:
+        def __init__(self, _settings):
+            self.device = object()
+
+        def show(self, frame):
+            pass
+
+        def clear(self):
+            pass
+
+    def record(snapshot, page, *args, **kwargs):
+        rendered.append((page, kwargs.get('web_port')))
+        return splash_frame(128, 64, 'PROTO-001')
+
+    monkeypatch.setattr(oled, 'OLEDDisplay', RecordingDisplay)
+    monkeypatch.setattr(oled, 'render_frame', record)
+    state = DeviceState('PROTO-001', 'VEH-001', 1)
+
+    oled.worker(
+        oled_settings(oled_access_seconds=60, web_port=9090), state, ControlledStop(waits_until_stop=5)
+    )
+
+    assert rendered == [('access', 9090)] * 4
 
 
 def test_oled_worker_disabled_does_not_open_display(monkeypatch):

@@ -4,9 +4,13 @@ import os
 import shutil
 import socket
 import threading
+import time
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
+from . import bluetooth
+from .common import run
+from .network import NetworkError, fields, nmcli
 from .observations import (
     DEVICE_MAX_AGE_MS,
     ObservationWriter,
@@ -67,7 +71,34 @@ def _ip_address() -> str | None:
         sock.close()
         return ip
     except Exception:
+        pass
+    # No default route (e.g. a hotspot without internet): use the first LAN address.
+    code, out, _ = run(['hostname', '-I'], 2)
+    addresses = out.split() if code == 0 else []
+    return addresses[0] if addresses else None
+
+
+LINK_REFRESH_SECONDS = 5.0
+
+
+def _wifi_ssid() -> str | None:
+    try:
+        output = nmcli('--fields', 'ACTIVE,SSID', 'device', 'wifi', 'list', '--rescan', 'no', timeout=5)
+    except NetworkError:
         return None
+    for line in output.splitlines():
+        row = fields(line)
+        if len(row) == 2 and row[0] == 'yes' and row[1]:
+            return row[1]
+    return None
+
+
+def _bluetooth_device() -> str | None:
+    try:
+        connected = [item for item in bluetooth.devices() if item.get('connected')]
+    except Exception:
+        return None
+    return connected[0].get('name') if connected else None
 
 
 def _software_version() -> str:
@@ -83,7 +114,12 @@ def worker(
     stop: threading.Event,
 ) -> None:
     previous = _cpu_snapshot()
+    links: dict[str, str | None] = {}
+    links_checked: float | None = None
     while not stop.is_set():
+        if links_checked is None or time.monotonic() - links_checked >= LINK_REFRESH_SECONDS:
+            links = {'wifiSsid': _wifi_ssid(), 'bluetoothDevice': _bluetooth_device()}
+            links_checked = time.monotonic()
         current = _cpu_snapshot()
         mem = _meminfo()
         disk = shutil.disk_usage('/')
@@ -91,6 +127,7 @@ def worker(
         payload = {
             'hostname': socket.gethostname(),
             'ipAddress': _ip_address(),
+            **links,
             'cpuPercent': _cpu_percent(previous, current),
             'cpuCount': os.cpu_count(),
             'temperatureC': _temperature(),

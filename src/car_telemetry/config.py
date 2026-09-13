@@ -115,6 +115,7 @@ class Settings:
     oled_height: int
     oled_rotation: int
     oled_page_seconds: float
+    oled_access_seconds: float
     oled_contrast: int
 
     obd_enabled: bool
@@ -214,6 +215,7 @@ def settings(explicit: str | None = None) -> Settings:
         oled_height=int(os.getenv("OLED_HEIGHT", "64")),
         oled_rotation=int(os.getenv("OLED_ROTATION", "0")),
         oled_page_seconds=float(os.getenv("OLED_PAGE_SECONDS", "3")),
+        oled_access_seconds=max(0.0, float(os.getenv("OLED_ACCESS_SECONDS", "20"))),
         oled_contrast=max(0, min(255, int(os.getenv("OLED_CONTRAST", "160")))),
         obd_enabled=_bool("OBD_ENABLED", True),
         obd_transport=os.getenv("OBD_TRANSPORT", "auto").strip().lower(),
