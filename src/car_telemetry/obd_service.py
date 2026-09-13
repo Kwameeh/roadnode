@@ -391,6 +391,8 @@ class OBDService:
                 for name, target in (("GET_DTC", "stored"), ("GET_CURRENT_DTC", "current")):
                     try:
                         value = self._query(self.connection, obd.commands[name], force=True)
+                        if value is None:
+                            raise RuntimeError("No diagnostic response")
                         normalized = _normalize_dtc_list(value)
                         if target == "stored":
                             stored = normalized
@@ -410,8 +412,10 @@ class OBDService:
                 except Exception as exc:
                     errors["FREEZE_DTC"] = str(exc)
 
-            self._detect_dtc_changes("stored", stored)
-            self._detect_dtc_changes("currentCycle", current)
+            if "GET_DTC" not in errors:
+                self._detect_dtc_changes("stored", stored)
+            if "GET_CURRENT_DTC" not in errors:
+                self._detect_dtc_changes("currentCycle", current)
 
             result = {
                 "stored": stored,
@@ -422,6 +426,13 @@ class OBDService:
                 "lastScanAt": utc_now(),
                 "errors": errors,
             }
+            self.observations.update_dtcs({
+                "observedAt": result["lastScanAt"], "source": "obd.dtc",
+                "quality": "invalid" if "GET_DTC" in errors and "GET_CURRENT_DTC" in errors else "valid",
+                "maxAgeMs": min(300_000, max(120_000, round(self.s.dtc_scan_seconds * 2_000))),
+                **({"stored": sorted({item["code"] for item in stored})[:256]} if "GET_DTC" not in errors else {}),
+                **({"pending": sorted({item["code"] for item in current})[:256]} if "GET_CURRENT_DTC" not in errors else {}),
+            })
             self.state.merge(
                 "obd",
                 {

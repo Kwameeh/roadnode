@@ -68,6 +68,8 @@ class VehicleFrameBuilder:
         }
         if observations.device is None:
             raise ValueError("device health observation is required to build a frame")
+        if "dtc" in observations.obd:
+            telemetry["obd"]["dtc"] = observations.obd["dtc"]
         telemetry["device"] = _without_none(observations.device)
 
         samples = []

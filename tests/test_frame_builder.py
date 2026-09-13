@@ -1,8 +1,25 @@
 import json
 
+import pytest
+
 from car_telemetry.frame_builder import FrameContext, VehicleFrameBuilder
 from car_telemetry.observations import ImuSample, ObservationStore, observation_meta
 from contracts.mqtt.v2 import validate_vehicle_frame
+
+
+@pytest.mark.parametrize("scan", [
+    {"stored": ["P0300"], "pending": ["P0420"]},
+    {"stored": []},
+    {"quality": "invalid"},
+])
+def test_diagnostic_snapshot_reaches_the_validated_mqtt_frame(scan):
+    store = populated_store()
+    observation = {"observedAt": "2026-08-27T14:25:31.800Z", "source": "obd.dtc", "quality": "valid", "maxAgeMs": 120000, **scan}
+    store.update_dtcs(observation)
+    frame_context = context()
+    frame = VehicleFrameBuilder().build(frame_context, store.snapshot(frame_context.captured_from, frame_context.captured_to))
+    validate_vehicle_frame(frame)
+    assert frame["payload"]["telemetry"]["obd"]["dtc"] == observation
 
 
 def populated_store(sample_count=20):

@@ -99,6 +99,7 @@ class ObservationReader(Protocol):
 
 
 class ObservationWriter(Protocol):
+    def update_dtcs(self, observation: dict[str, Any]) -> None: ...
     def update_gps(self, observation: dict[str, Any]) -> None: ...
 
     def update_obd_status(self, *, connected: bool, engine_on: bool | None) -> None: ...
@@ -168,6 +169,10 @@ class ObservationStore:
         with self._lock:
             self._obd["signals"][name] = copy.deepcopy(observation)
 
+    def update_dtcs(self, observation: dict[str, Any]) -> None:
+        with self._lock:
+            self._obd["dtc"] = copy.deepcopy(observation)
+
     def update_device(self, observation: dict[str, Any]) -> None:
         with self._lock:
             self._device = copy.deepcopy(observation)
@@ -194,6 +199,8 @@ class ObservationStore:
             if device is not None and parse_utc(device["observedAt"]) > end:
                 device = None
             obd = copy.deepcopy(self._obd)
+            if "dtc" in obd and parse_utc(obd["dtc"]["observedAt"]) > end:
+                del obd["dtc"]
             obd["signals"] = {
                 name: signal
                 for name, signal in obd["signals"].items()
