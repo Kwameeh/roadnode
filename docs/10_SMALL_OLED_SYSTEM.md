@@ -4,8 +4,11 @@ The optional 1.3-inch 128×64 monochrome OLED is a glanceable vehicle display. I
 
 `OLED_DRIVER` selects `sh1106` (default) or `ssd1306`. Both use the same I²C wiring and Pillow renderer through `luma.oled`. The display is cleared at startup and shutdown.
 
-Pages rotate every `OLED_PAGE_SECONDS` (three seconds by default):
+After the startup splash, the web app access page stays on screen for `OLED_ACCESS_SECONDS` (20 seconds by default, `0` to skip) so the address can be read at boot. It updates live while Wi-Fi comes up.
 
+Pages then rotate every `OLED_PAGE_SECONDS` (three seconds by default):
+
+- Web app: `<ip>:<WEB_PORT>`, `<hostname>.local:<WEB_PORT>`, the connected Wi-Fi SSID and the connected Bluetooth device (`--` when none)
 - Driving: large speed, RPM and coolant temperature
 - Location: GPS fix, satellites, heading and coordinates
 - Vehicle health: voltage, coolant, fuel and DTC count
