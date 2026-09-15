@@ -102,6 +102,14 @@ class APIServer:
                             'controller': bluetooth.controller_status(),
                             'devices': bluetooth.devices(),
                             'configuredElmMac': fresh.obd_mac,
+                            'configuredBluetoothCandidates': [
+                                {'mac': item.mac, 'channel': item.channel}
+                                for item in bluetooth.parse_candidates(
+                                    fresh.obd_bluetooth_candidates,
+                                    fresh.obd_mac,
+                                    fresh.obd_rfcomm_channel,
+                                )
+                            ],
                             'configuredRfcommChannel': fresh.obd_rfcomm_channel,
                         },
                     )
@@ -169,6 +177,7 @@ class APIServer:
                                 'OBD_ENABLED': 'true',
                                 'OBD_TRANSPORT': 'bluetooth',
                                 'OBD_MAC': mac,
+                                'OBD_BLUETOOTH_CANDIDATES': f'{mac}@{channel}',
                                 'OBD_RFCOMM_CHANNEL': str(channel),
                             }
                         )

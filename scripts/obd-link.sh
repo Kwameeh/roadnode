@@ -12,6 +12,35 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+discover_channel() {
+  local mac="$1"
+  sdptool browse "$mac" 2>/dev/null |
+    sed -n '/ELM327/,/Channel:/p;/"Serial Port"/,/Channel:/p' |
+    sed -n 's/.*Channel:[[:space:]]*\([0-9][0-9]*\).*/\1/p' |
+    head -n 1
+}
+
+try_candidate() {
+  local token="$1"
+  local fallback_channel="$2"
+  local mac="${token%@*}"
+  local channel=""
+  if [[ "$token" == *"@"* ]]; then
+    channel="${token##*@}"
+  else
+    channel="$(discover_channel "$mac")"
+  fi
+  if [[ -z "$channel" ]]; then
+    channel="$fallback_channel"
+  fi
+
+  bluetoothctl trust "$mac" >/dev/null 2>&1 || true
+  bluetoothctl connect "$mac" >/dev/null 2>&1 || true
+  cleanup
+  rfcomm bind rfcomm0 "$mac" "$channel" >/dev/null 2>&1 || return 1
+  [[ -e /dev/rfcomm0 ]]
+}
+
 while true; do
   if [[ ! -f "$ENV_FILE" ]]; then
     sleep 5
@@ -29,6 +58,7 @@ while true; do
 
   MODE="${OBD_TRANSPORT:-auto}"
   MAC="${OBD_MAC:-}"
+  CANDIDATES="${OBD_BLUETOOTH_CANDIDATES:-}"
   CHANNEL="${OBD_RFCOMM_CHANNEL:-1}"
   ENABLED="${OBD_ENABLED:-true}"
 
@@ -45,11 +75,18 @@ while true; do
     continue
   fi
 
-  if [[ -n "$MAC" ]]; then
-    bluetoothctl trust "$MAC" >/dev/null 2>&1 || true
-    bluetoothctl connect "$MAC" >/dev/null 2>&1 || true
-    if [[ ! -e /dev/rfcomm0 ]]; then
-      rfcomm bind rfcomm0 "$MAC" "$CHANNEL" >/dev/null 2>&1 || true
+  if [[ -z "$CANDIDATES" && -n "$MAC" ]]; then
+    CANDIDATES="${MAC}@${CHANNEL}"
+  fi
+
+  if [[ -n "$CANDIDATES" && ! -e /dev/rfcomm0 ]]; then
+    IFS=',' read -r -a TOKENS <<< "$CANDIDATES"
+    for token in "${TOKENS[@]}"; do
+      token="$(echo "$token" | xargs)"
+      [[ -z "$token" ]] && continue
+      if try_candidate "$token" "$CHANNEL"; then
+        break
+      fi
     fi
   fi
 

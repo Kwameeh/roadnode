@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import subprocess
 import time
+from dataclasses import dataclass
 from typing import Any
 
 import pexpect
@@ -12,11 +13,45 @@ from .common import run
 MAC_RE = re.compile(r"^(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
 
 
+@dataclass(frozen=True)
+class BluetoothCandidate:
+    mac: str
+    channel: int | None = None
+
+    def token(self) -> str:
+        return f"{self.mac}@{self.channel}" if self.channel is not None else self.mac
+
+
 def validate_mac(mac: str) -> str:
     value = mac.strip().upper()
     if not MAC_RE.fullmatch(value):
         raise ValueError("Bluetooth MAC must look like AA:BB:CC:DD:EE:FF")
     return value
+
+
+def validate_channel(channel: int | str) -> int:
+    value = int(str(channel).strip(), 10)
+    if value < 1 or value > 30:
+        raise ValueError("RFCOMM channel must be between 1 and 30")
+    return value
+
+
+def parse_candidates(raw: str, fallback_mac: str = "", fallback_channel: int | str = 1) -> list[BluetoothCandidate]:
+    tokens = [item.strip() for item in raw.split(",") if item.strip()]
+    if not tokens and fallback_mac.strip():
+        tokens = [f"{fallback_mac}@{fallback_channel}"]
+
+    candidates: list[BluetoothCandidate] = []
+    seen: set[str] = set()
+    for token in tokens:
+        mac_raw, sep, channel_raw = token.partition("@")
+        mac = validate_mac(mac_raw)
+        if mac in seen:
+            continue
+        seen.add(mac)
+        channel = validate_channel(channel_raw) if sep else None
+        candidates.append(BluetoothCandidate(mac, channel))
+    return candidates
 
 
 def power_on() -> None:
@@ -197,6 +232,7 @@ def discover_channel(mac: str) -> int | None:
 
 def bind(mac: str, channel: int) -> None:
     mac = validate_mac(mac)
+    channel = validate_channel(channel)
     subprocess.run(
         ["sudo", "rfcomm", "release", "rfcomm0"],
         stdout=subprocess.DEVNULL,
@@ -204,3 +240,17 @@ def bind(mac: str, channel: int) -> None:
         check=False,
     )
     subprocess.run(["sudo", "rfcomm", "bind", "rfcomm0", mac, str(int(channel))], check=True)
+
+
+def bind_first_candidate(candidates: list[BluetoothCandidate]) -> BluetoothCandidate:
+    errors: list[str] = []
+    for candidate in candidates:
+        try:
+            channel = candidate.channel if candidate.channel is not None else discover_channel(candidate.mac)
+            if channel is None:
+                raise RuntimeError("No ELM327/Serial Port RFCOMM channel was found")
+            bind(candidate.mac, channel)
+            return BluetoothCandidate(candidate.mac, channel)
+        except Exception as exc:
+            errors.append(f"{candidate.mac}: {exc}")
+    raise RuntimeError("No Bluetooth candidate could be bound to rfcomm0" + (f" ({'; '.join(errors)})" if errors else ""))

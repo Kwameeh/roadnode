@@ -123,6 +123,7 @@ class Settings:
     obd_usb_port: str
     obd_bluetooth_port: str
     obd_mac: str
+    obd_bluetooth_candidates: str
     obd_rfcomm_channel: int
     obd_baud: int | None
     obd_protocol: str | None
@@ -222,6 +223,7 @@ def settings(explicit: str | None = None) -> Settings:
         obd_usb_port=os.getenv("OBD_USB_PORT", "auto").strip(),
         obd_bluetooth_port=os.getenv("OBD_BLUETOOTH_PORT", "/dev/rfcomm0").strip(),
         obd_mac=os.getenv("OBD_MAC", "").strip().upper(),
+        obd_bluetooth_candidates=os.getenv("OBD_BLUETOOTH_CANDIDATES", "").strip(),
         obd_rfcomm_channel=int(os.getenv("OBD_RFCOMM_CHANNEL", "1")),
         obd_baud=baud,
         obd_protocol=protocol,
