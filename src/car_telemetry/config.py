@@ -136,6 +136,7 @@ class Settings:
     obd_async_loop_delay: float
     obd_reconnect_seconds: float
     obd_round_trip_seconds: float
+    obd_profiles_file: str
 
     dtc_scan_seconds: float
     dtc_max_events: int
@@ -241,6 +242,9 @@ def settings(explicit: str | None = None) -> Settings:
         # answers, which is what bounds the optional signals an owner may add.
         obd_round_trip_seconds=max(
             0.01, float(os.getenv("OBD_ROUND_TRIP_SECONDS", "0.08"))
+        ),
+        obd_profiles_file=os.path.expanduser(
+            os.getenv("OBD_PROFILES_FILE", "~/.local/share/car-telemetry/obd-profiles.json")
         ),
         dtc_scan_seconds=float(os.getenv("DTC_SCAN_SECONDS", "60")),
         dtc_max_events=int(os.getenv("DTC_MAX_EVENTS", "100")),

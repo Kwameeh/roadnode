@@ -3,13 +3,18 @@
 The switcher only prepares the Bluetooth side (pair, trust, SPP channel,
 telemetry.env, /dev/rfcomm0). python-OBD in the engine still owns the ELM327
 conversation, so a switch ends by restarting the engine and watching its status.
+
+Two profiles are built in. Any other adapter can be switched to by MAC address
+and saved under a name (`OBD_PROFILES_FILE`) to be used by name next time.
 """
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -22,23 +27,30 @@ LINK_SERVICE = "car-telemetry-obd-link.service"
 RFCOMM_DEVICE = "rfcomm0"
 BLUETOOTH_PORT = f"/dev/{RFCOMM_DEVICE}"
 
+# ELM327 clones ship with 1234 or 1111; 0000 is a last resort. A phone ignores
+# the PIN and asks for confirmation instead.
+DEFAULT_PINS = ("1234", "1111", "0000")
+PROFILE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+RESERVED_NAMES = {"list", "current", "add", "remove", "use"}
+
 
 @dataclass(frozen=True)
 class ObdProfile:
     id: str
     name: str
     mac: str
-    channel: int
-    # PINs tried in order when the device is not paired yet. Empty means the
-    # device confirms pairing itself (a phone shows a passkey prompt).
-    pins: tuple[str, ...] = ()
+    # None means "discover it with SDP every time".
+    channel: int | None
+    # PINs tried in order when the device is not paired yet.
+    pins: tuple[str, ...] = DEFAULT_PINS
     # When SDP finds no Serial Port service: True aborts before anything is
-    # stopped, False falls back to the known-good channel.
+    # stopped, False falls back to the saved channel.
     require_service: bool = False
     service_hint: str = ""
+    builtin: bool = False
 
 
-PROFILES: dict[str, ObdProfile] = {
+BUILTIN_PROFILES: dict[str, ObdProfile] = {
     profile.id: profile
     for profile in (
         ObdProfile(
@@ -46,27 +58,136 @@ PROFILES: dict[str, ObdProfile] = {
             name="OBDII / Physical ELM327",
             mac="00:10:CC:4F:36:03",
             channel=1,
-            # ELM327 clones ship with 1234 or 1111; 0000 is a last resort.
-            pins=("1234", "1111", "0000"),
             service_hint="Make sure the adapter is plugged into a powered OBD-II port.",
+            builtin=True,
         ),
         ObdProfile(
             id="android",
             name="Android ELM327 Emulator",
             mac="EC:46:2C:93:7E:F4",
             channel=7,
+            pins=(),
             require_service=True,
             service_hint="Start the ELM327 Emulator app/server on the phone.",
+            builtin=True,
         ),
     )
 }
+# Kept for callers that only need the built-in names.
+PROFILES = BUILTIN_PROFILES
 
 
-def get_profile(profile_id: str) -> ObdProfile:
+# --- saved profiles -----------------------------------------------------------
+
+
+def validate_name(name: str) -> str:
+    value = name.strip().lower()
+    if not PROFILE_NAME_RE.fullmatch(value):
+        raise ValueError("Profile names use 1-32 lower-case letters, digits, '-' or '_', starting with a letter or digit")
+    if value in RESERVED_NAMES:
+        raise ValueError(f"'{value}' is a command, not a profile name")
+    if value in BUILTIN_PROFILES:
+        raise ValueError(f"'{value}' is a built-in profile; choose another name")
+    return value
+
+
+def load_saved_profiles(path: str | Path) -> dict[str, ObdProfile]:
+    file = Path(path).expanduser()
+    if not file.exists():
+        return {}
     try:
-        return PROFILES[profile_id.strip().lower()]
+        document = json.loads(file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{file} is not valid JSON: {exc}") from exc
+
+    profiles: dict[str, ObdProfile] = {}
+    for key, raw in (document.get("profiles") or {}).items():
+        try:
+            profile_id = validate_name(key)
+            channel = raw.get("channel")
+            profiles[profile_id] = ObdProfile(
+                id=profile_id,
+                name=str(raw.get("name") or profile_id),
+                mac=bluetooth.validate_mac(str(raw.get("mac", ""))),
+                channel=None if channel in (None, "") else bluetooth.validate_channel(channel),
+                pins=tuple(str(pin) for pin in raw.get("pins", DEFAULT_PINS)),
+            )
+        except (ValueError, TypeError, AttributeError):
+            # One bad entry must not hide the others.
+            continue
+    return profiles
+
+
+def _write_saved_profiles(path: str | Path, profiles: dict[str, ObdProfile]) -> Path:
+    file = Path(path).expanduser()
+    file.parent.mkdir(parents=True, exist_ok=True)
+    document = {
+        "profiles": {
+            profile.id: {
+                "name": profile.name,
+                "mac": profile.mac,
+                "channel": profile.channel,
+                "pins": list(profile.pins),
+            }
+            for profile in sorted(profiles.values(), key=lambda item: item.id)
+        }
+    }
+    temporary = file.with_suffix(".tmp")
+    temporary.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(file)
+    return file
+
+
+def save_profile(path: str | Path, profile: ObdProfile) -> Path:
+    profiles = load_saved_profiles(path)
+    profiles[profile.id] = replace(profile, builtin=False, require_service=False, service_hint="")
+    return _write_saved_profiles(path, profiles)
+
+
+def remove_profile(path: str | Path, name: str) -> bool:
+    profiles = load_saved_profiles(path)
+    if profiles.pop(name.strip().lower(), None) is None:
+        return False
+    _write_saved_profiles(path, profiles)
+    return True
+
+
+def make_profile(
+    mac: str,
+    *,
+    name: str | None = None,
+    channel: int | None = None,
+    pins: list[str] | tuple[str, ...] | None = None,
+    label: str | None = None,
+) -> ObdProfile:
+    mac = bluetooth.validate_mac(mac)
+    profile_id = validate_name(name) if name else mac.replace(":", "").lower()
+    return ObdProfile(
+        id=profile_id,
+        name=label or (profile_id if name else f"Bluetooth device {mac}"),
+        mac=mac,
+        channel=None if channel is None else bluetooth.validate_channel(channel),
+        pins=tuple(pins) if pins else DEFAULT_PINS,
+    )
+
+
+def all_profiles(s: Settings) -> dict[str, ObdProfile]:
+    try:
+        saved = load_saved_profiles(s.obd_profiles_file)
+    except ValueError:
+        saved = {}
+    return {**BUILTIN_PROFILES, **saved}
+
+
+def get_profile(profile_id: str, profiles: dict[str, ObdProfile] | None = None) -> ObdProfile:
+    available = profiles if profiles is not None else BUILTIN_PROFILES
+    try:
+        return available[profile_id.strip().lower()]
     except KeyError:
-        raise ValueError(f"Unknown OBD profile '{profile_id}'. Choose one of: {', '.join(PROFILES)}") from None
+        raise ValueError(
+            f"Unknown OBD profile '{profile_id}'. Choose one of: {', '.join(available)}, "
+            "or switch by address with --mac AA:BB:CC:DD:EE:FF"
+        ) from None
 
 
 def profile_env_values(profile: ObdProfile, channel: int) -> dict[str, str]:
@@ -95,8 +216,12 @@ def configured_target(s: Settings) -> tuple[str, int]:
     return s.obd_mac, s.obd_rfcomm_channel
 
 
-def match_profile(mac: str) -> ObdProfile | None:
-    return next((p for p in PROFILES.values() if p.mac == mac.strip().upper()), None)
+def match_profile(mac: str, profiles: dict[str, ObdProfile] | None = None) -> ObdProfile | None:
+    available = profiles if profiles is not None else BUILTIN_PROFILES
+    return next((p for p in available.values() if p.mac == mac.strip().upper()), None)
+
+
+# --- output helpers -----------------------------------------------------------
 
 
 def _as_root(command: list[str]) -> list[str]:
@@ -127,23 +252,26 @@ def _fail(name: str, detail: str) -> SwitchFailed:
 
 def print_profiles(s: Settings) -> None:
     active_mac, _ = configured_target(s)
+    profiles = all_profiles(s)
     print("Available OBD Bluetooth profiles\n")
-    for profile in PROFILES.values():
-        marker = "  (active)" if profile.mac == active_mac else ""
-        print(f"  {profile.id}{marker}")
+    for profile in profiles.values():
+        tags = [tag for tag in ("built-in" if profile.builtin else "saved", "active" if profile.mac == active_mac else "") if tag]
+        print(f"  {profile.id}  ({', '.join(tags)})")
         print(f"    Device:  {profile.name}")
         print(f"    MAC:     {profile.mac}")
-        print(f"    RFCOMM:  {profile.channel}")
+        print(f"    RFCOMM:  {profile.channel if profile.channel is not None else 'auto (discovered each switch)'}")
         if profile.pins:
             print(f"    PINs:    {', '.join(profile.pins)}")
         print()
+    print(f"Saved profiles file: {Path(s.obd_profiles_file).expanduser()}")
+    print("Add one:  telemetry obd-profile add NAME --mac AA:BB:CC:DD:EE:FF [--channel N]")
 
 
 def print_current(s: Settings) -> int:
     mac, channel = configured_target(s)
-    profile = match_profile(mac) if mac else None
+    profile = match_profile(mac, all_profiles(s)) if mac else None
     print("RoadNode OBD Profile\n")
-    print(f"Profile:   {profile.id if profile else 'custom' if mac else 'none'}")
+    print(f"Profile:   {profile.id if profile else 'unsaved' if mac else 'none'}")
     print(f"Transport: {s.obd_transport}")
     print(f"MAC:       {mac or '-'}")
     print(f"RFCOMM:    {channel}")
@@ -167,9 +295,14 @@ def print_current(s: Settings) -> int:
     obd = (read_json(s.status_file) or {}).get("obd", {})
     if obd.get("connected"):
         print(f"ELM327:    responding ({obd.get('protocolName') or obd.get('status') or 'connected'})")
+    elif obd.get("connecting"):
+        print("ELM327:    connecting (python-OBD is still talking to the adapter)")
     else:
         print(f"ELM327:    not connected{' - ' + obd['error'] if obd.get('error') else ''}")
     return 0
+
+
+# --- switch sequence ----------------------------------------------------------
 
 
 def _prepare_bluetooth(profile: ObdProfile) -> None:
@@ -183,6 +316,11 @@ def _prepare_bluetooth(profile: ObdProfile) -> None:
     if not bluetooth.device_known(profile.mac):
         print(f"       Scanning for {profile.mac} ...")
         bluetooth.scan(8)
+        if not bluetooth.device_known(profile.mac):
+            raise _fail(
+                "Device found",
+                f"{profile.mac} is not in range or not discoverable. {profile.service_hint}".strip(),
+            )
 
     info = bluetooth.device_info(profile.mac)
     if info["paired"]:
@@ -209,7 +347,7 @@ def _prepare_bluetooth(profile: ObdProfile) -> None:
 def _resolve_channel(profile: ObdProfile, forced: int | None) -> int:
     if forced is not None:
         channel = bluetooth.validate_channel(forced)
-        _ok("RFCOMM channel", f"{channel} (--channel override)")
+        _ok("RFCOMM channel", f"{channel} (--channel)")
         return channel
 
     try:
@@ -221,21 +359,46 @@ def _resolve_channel(profile: ObdProfile, forced: int | None) -> int:
 
     if discovered is not None:
         _ok("Serial Port discovered", f"RFCOMM channel {discovered}")
-        if discovered != profile.channel:
+        if profile.channel is not None and discovered != profile.channel:
             _warn("RFCOMM channel", f"device now uses {discovered}, profile default is {profile.channel}")
         return discovered
 
-    if profile.require_service:
+    if profile.require_service or profile.channel is None:
+        retry = f"telemetry obd-profile {profile.id}" if profile.builtin else f"telemetry obd-profile --mac {profile.mac} --channel N"
         raise _fail(
             "Serial Port discovered",
-            f"{profile.name} was found but {problem}. {profile.service_hint} "
-            f"Then run: telemetry obd-profile {profile.id}",
+            f"{profile.name}: {problem}. {profile.service_hint} "
+            f"Check `sdptool browse {profile.mac}` for the channel, then run: {retry}".replace("  ", " "),
         )
-    _warn("Serial Port discovered", f"{problem}; using known channel {profile.channel}")
+    _warn("Serial Port discovered", f"{problem}; using saved channel {profile.channel}")
     return profile.channel
 
 
-def _wait_for_binding(profile: ObdProfile, channel: int, seconds: float) -> dict[str, Any] | None:
+def _release_rfcomm(attempts: int = 5) -> None:
+    """Release every RFCOMM binding and confirm rfcomm0 is really gone.
+
+    The kernel refuses to release a device another process still has open, and
+    obd-link.sh never rebinds an existing rfcomm0, so carrying on would leave
+    the old adapter in place.
+    """
+    for _ in range(attempts):
+        _root_run(["rfcomm", "release", "all"])
+        binding = bluetooth.rfcomm_bindings().get(RFCOMM_DEVICE)
+        if binding is None:
+            _ok("Old RFCOMM released", "rfcomm release all")
+            return
+        time.sleep(1)
+    _, out, err = _root_run(["fuser", "-v", BLUETOOTH_PORT], 5)
+    holders = " ".join((out + " " + err).split()) or "unknown process"
+    raise _fail(
+        "Old RFCOMM released",
+        f"{BLUETOOTH_PORT} is still bound to {binding['mac']} channel {binding['channel']} "
+        f"and held open by: {holders}. Stop that process (ModemManager: "
+        "sudo systemctl disable --now ModemManager) and switch again.",
+    )
+
+
+def _wait_for_binding(channel: int, seconds: float) -> dict[str, Any] | None:
     deadline = time.monotonic() + seconds
     binding = None
     while time.monotonic() < deadline:
@@ -260,19 +423,31 @@ def _wait_for_elm(s: Settings, since: float, seconds: float) -> dict[str, Any]:
     return obd
 
 
+def _restart_services() -> None:
+    _root_run(["systemctl", "start", LINK_SERVICE])
+    _root_run(["systemctl", "start", ENGINE_SERVICE])
+
+
 def switch_profile(
     s: Settings,
-    profile_id: str,
+    target: str | ObdProfile,
     channel: int | None = None,
     reboot: bool = False,
     verify_seconds: float = 45,
+    save_as: str | None = None,
 ) -> int:
-    profile = get_profile(profile_id)
+    """Switch to a profile id, or to an ad-hoc profile; `save_as` stores it on success."""
+    try:
+        profile = target if isinstance(target, ObdProfile) else get_profile(target, all_profiles(s))
+    except ValueError as exc:
+        print(exc)
+        return 2
+
     print("RoadNode OBD Profile Switch")
     print("---------------------------")
     print(f"Profile        {profile.name} ({profile.id})")
     print(f"MAC            {profile.mac}")
-    print(f"Saved channel  {profile.channel}\n")
+    print(f"Saved channel  {profile.channel if profile.channel is not None else 'auto'}\n")
 
     try:
         env_path = find_env()
@@ -287,11 +462,23 @@ def switch_profile(
         _prepare_bluetooth(profile)
         channel = _resolve_channel(profile, channel)
 
+        if save_as:
+            saved = replace(profile, id=save_as, channel=channel)
+            if profile.name == f"Bluetooth device {profile.mac}":
+                saved = replace(saved, name=save_as)
+            path = save_profile(s.obd_profiles_file, saved)
+            profile = saved
+            _ok("Profile saved", f"{save_as} -> {path} (next time: telemetry obd-profile {save_as})")
+
         _root_run(["systemctl", "stop", ENGINE_SERVICE])
         _ok("Telemetry stopped", ENGINE_SERVICE)
         _root_run(["systemctl", "stop", LINK_SERVICE])
-        _root_run(["rfcomm", "release", "all"])
-        _ok("Old RFCOMM released", "rfcomm release all")
+        try:
+            _release_rfcomm()
+        except SwitchFailed:
+            # Nothing was changed yet: bring the previous profile back up.
+            _restart_services()
+            raise
 
         set_env_values(profile_env_values(profile, channel), str(env_path))
         _ok("telemetry.env updated", str(env_path))
@@ -304,7 +491,7 @@ def switch_profile(
         _root_run(["systemctl", "start", LINK_SERVICE])
         _ok("OBD link restarted", LINK_SERVICE)
 
-        binding = _wait_for_binding(profile, channel, 20)
+        binding = _wait_for_binding(channel, 20)
         link_ok = bool(binding and binding["mac"] == profile.mac and binding["channel"] == channel)
         if link_ok:
             _ok(BLUETOOTH_PORT, f"{profile.mac} channel {channel}")
@@ -327,9 +514,10 @@ def switch_profile(
             if obd.get("connected"):
                 _ok("ELM327 responding", str(obd.get("protocolName") or obd.get("status") or "connected"))
             else:
+                state = "still connecting" if obd.get("connecting") else obd.get("error") or "no status"
                 _warn(
                     "ELM327 responding",
-                    f"not yet ({obd.get('error') or 'no status'}). {profile.service_hint} "
+                    f"not yet ({state}). {profile.service_hint} "
                     "Check again with: telemetry obd-profile current",
                 )
     except SwitchFailed:
@@ -337,3 +525,26 @@ def switch_profile(
 
     print(f"\nActive profile: {profile.id}")
     return 0
+
+
+def add_profile(s: Settings, name: str, mac: str, channel: int | None, pins: list[str] | None, label: str | None) -> int:
+    try:
+        profile = make_profile(mac, name=name, channel=channel, pins=pins, label=label)
+    except ValueError as exc:
+        print(exc)
+        return 2
+    path = save_profile(s.obd_profiles_file, profile)
+    print(f"Saved profile '{profile.id}' ({profile.mac}, RFCOMM {profile.channel if profile.channel is not None else 'auto'}) to {path}")
+    print(f"Switch to it with: telemetry obd-profile {profile.id}")
+    return 0
+
+
+def delete_profile(s: Settings, name: str) -> int:
+    if name.strip().lower() in BUILTIN_PROFILES:
+        print(f"'{name}' is built in and cannot be removed")
+        return 2
+    if remove_profile(s.obd_profiles_file, name):
+        print(f"Removed profile '{name.strip().lower()}'")
+        return 0
+    print(f"No saved profile named '{name}'")
+    return 1

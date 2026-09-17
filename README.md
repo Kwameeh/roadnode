@@ -452,12 +452,45 @@ What a switch does:
    that fails, `obd2` falls back to channel 1. `android` stops and tells you
    to start the emulator app.
 3. Stops `car-telemetry` and `car-telemetry-obd-link`, runs
-   `rfcomm release all`, and writes `OBD_TRANSPORT=bluetooth`, `OBD_MAC`,
+   `rfcomm release all` (and checks the old binding is really gone), and writes
+   `OBD_TRANSPORT=bluetooth`, `OBD_MAC`,
    `OBD_RFCOMM_CHANNEL` and `OBD_BLUETOOTH_CANDIDATES` to `telemetry.env`.
 4. Starts the link service, confirms `/dev/rfcomm0` points at the new MAC and
    channel, restarts the engine, and waits up to 45 s for the ELM327 to answer.
 
 If step 1 or 2 fails, nothing is stopped or changed.
+
+### Any adapter by MAC address, and saved profiles
+
+Besides `obd2` and `android`, you can switch to any Bluetooth ELM327 by its
+address. Leave out `--channel` and the RFCOMM channel is found automatically;
+add `--name` to save it so you can switch by name next time:
+
+```bash
+bluetoothctl devices                                   # find the adapter's MAC
+telemetry obd-profile --mac AA:BB:CC:DD:EE:FF          # switch, channel found automatically
+telemetry obd-profile --mac AA:BB:CC:DD:EE:FF --channel 2   # switch with a channel you choose
+telemetry obd-profile --mac AA:BB:CC:DD:EE:FF --name mycar  # switch and save as "mycar"
+telemetry obd-profile mycar                            # next time: switch by name
+
+telemetry obd-profile add mycar --mac AA:BB:CC:DD:EE:FF [--channel 2]   # save without switching
+telemetry obd-profile add mycar --mac AA:BB:CC:DD:EE:FF --pin 6789 --label "Blue OBDLink"
+telemetry obd-profile remove mycar
+telemetry obd-profile list                             # built-in and saved profiles
+```
+
+- Names are 1-32 lower-case letters, digits, `-` or `_`, and cannot be `obd2`,
+  `android`, `list`, `current`, `add` or `remove`.
+- Saving with `--name` stores the channel that was used. A profile saved with
+  `add` and no `--channel` discovers the channel on every switch.
+- Pairing tries PIN `1234`, `1111`, then `0000` unless you give `--pin`
+  (repeatable). Phones ask for confirmation on screen instead.
+- Saved profiles live in `OBD_PROFILES_FILE`
+  (`~/.local/share/car-telemetry/obd-profiles.json`), outside the Git checkout,
+  so updates do not remove them.
+- If `/dev/rfcomm0` cannot be released because another program holds it open,
+  the switch stops, names that program, and restarts the previous profile.
+  ModemManager is a common cause: `sudo systemctl disable --now ModemManager`.
 
 ## 12. Local web app and Wi-Fi
 
@@ -566,6 +599,8 @@ existing env file.
 | `telemetry web-url` | Local web app URLs |
 | `telemetry logs -f` | Follow engine logs (`-n 200` for more history) |
 | `telemetry obd-profile list \| current \| obd2 \| android` | Bluetooth OBD profiles ([§11](#11-switching-bluetooth-obd-profiles)) |
+| `telemetry obd-profile --mac MAC [--channel N] [--name NAME]` | Switch to any Bluetooth adapter; `--name` saves it |
+| `telemetry obd-profile add NAME --mac MAC` / `remove NAME` | Manage saved profiles |
 | `telemetry obd-ports` | USB candidates, Bluetooth port and the selected port |
 | `telemetry obd-transport auto\|usb\|bluetooth` | Change transport on the running engine and save it |
 | `telemetry obd-reconnect` | Force python-OBD to reconnect |

@@ -32,7 +32,16 @@ telemetry obd-profile obd2        # physical ELM327  00:10:CC:4F:36:03, RFCOMM 1
 telemetry obd-profile android     # ELM327 Emulator  EC:46:2C:93:7E:F4, RFCOMM 7
 telemetry obd-profile android --channel 7   # skip SDP discovery
 telemetry obd-profile android --reboot      # save, then cold-boot test
+telemetry obd-profile --mac AA:BB:CC:DD:EE:FF                 # any adapter, channel discovered
+telemetry obd-profile --mac AA:BB:CC:DD:EE:FF --channel 2     # any adapter, your channel
+telemetry obd-profile --mac AA:BB:CC:DD:EE:FF --name mycar    # switch and save as mycar
+telemetry obd-profile mycar                                   # switch to a saved profile
+telemetry obd-profile add mycar --mac AA:BB:CC:DD:EE:FF [--channel 2] [--pin 6789]
+telemetry obd-profile remove mycar
 ```
+
+Saved profiles are kept in `~/.local/share/car-telemetry/obd-profiles.json`
+(`OBD_PROFILES_FILE`).
 
 Run it as the RoadNode user (not with `sudo`); it calls `sudo` itself for
 `systemctl` and `rfcomm`. A switch:
