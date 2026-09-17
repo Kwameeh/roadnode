@@ -1,0 +1,4 @@
+ python3 -c "import json;d=json.load(open('/home/kwameeh/.local/state/car-
+  telemetry/
+  status.json'));print(json.dumps({'agent':d.get('agent'),'imu':d.get('imu'),'publi
+  sher':d.get('publisher')},indent=2))"

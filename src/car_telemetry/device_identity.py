@@ -13,7 +13,8 @@ from .observations import parse_utc, utc_now
 
 CREDENTIAL_SCHEMA_VERSION = 1
 TOPIC_ROOT = "roadnode/v2/devices"
-PUBLISHABLE_CHANNELS = ("frame", "metadata", "dtc", "status")
+KNOWN_CHANNELS = ("frame", "metadata", "dtc", "status")
+PUBLISHABLE_CHANNELS = ("frame",)
 SECRET_BYTES = 32
 
 
@@ -89,7 +90,7 @@ def device_namespace(device_id: str) -> str:
 
 
 def topic_for(device_id: str, channel: str) -> str:
-    if channel not in PUBLISHABLE_CHANNELS:
+    if channel not in KNOWN_CHANNELS:
         raise ValueError(f"unsupported channel: {channel}")
     return f"{device_namespace(device_id)}/{channel}"
 
@@ -220,7 +221,7 @@ def render_emqx_acl(device_ids: list[str]) -> str:
     ]
     for device_id in device_ids:
         for topic in allowed_publish_topics(device_id):
-            lines.append(f'{{allow, {{user, "{device_id}"}}, publish, ["{topic}"]}}.')
-        lines.append(f'{{deny, {{user, "{device_id}"}}, subscribe, ["#"]}}.')
+            lines.append(f'{{allow, {{clientid, "{device_id}"}}, publish, ["{topic}"]}}.')
+        lines.append(f'{{deny, {{clientid, "{device_id}"}}, subscribe, ["#"]}}.')
     lines.append("{deny, all}.")
     return "\n".join(lines) + "\n"

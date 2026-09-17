@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import bluetooth
 from .config import Settings, set_env_values, settings as load_settings
 from .obd_transport import resolve, usb_candidates
+from .oled import web_url as oled_web_url
 
 
 class APIServer:
@@ -102,6 +104,14 @@ class APIServer:
                             'controller': bluetooth.controller_status(),
                             'devices': bluetooth.devices(),
                             'configuredElmMac': fresh.obd_mac,
+                            'configuredBluetoothCandidates': [
+                                {'mac': item.mac, 'channel': item.channel}
+                                for item in bluetooth.parse_candidates(
+                                    fresh.obd_bluetooth_candidates,
+                                    fresh.obd_mac,
+                                    fresh.obd_rfcomm_channel,
+                                )
+                            ],
                             'configuredRfcommChannel': fresh.obd_rfcomm_channel,
                         },
                     )
@@ -115,6 +125,17 @@ class APIServer:
                             str(body.get('name', '')), bool(body.get('selected', True))
                         )
                         return self.send_json(200, {'ok': True, 'policy': policy})
+
+                    if self.path == '/oled/qr':
+                        seconds = max(5.0, min(float(body.get('seconds', 60)), 600.0))
+                        snapshot = outer.state.snapshot()
+                        url = oled_web_url(snapshot, outer.settings.web_port)
+                        if url is None:
+                            raise RuntimeError('The Pi has no network address yet, so there is no web app link to show')
+                        if not outer.settings.oled_enabled:
+                            raise RuntimeError('OLED_ENABLED is false in telemetry.env')
+                        outer.state.merge('oled', {'qrUntil': time.time() + seconds})
+                        return self.send_json(200, {'ok': True, 'url': url, 'seconds': seconds})
 
                     if self.path == '/obd/reconnect':
                         outer.obd.reconnect()
@@ -169,6 +190,7 @@ class APIServer:
                                 'OBD_ENABLED': 'true',
                                 'OBD_TRANSPORT': 'bluetooth',
                                 'OBD_MAC': mac,
+                                'OBD_BLUETOOTH_CANDIDATES': f'{mac}@{channel}',
                                 'OBD_RFCOMM_CHANNEL': str(channel),
                             }
                         )

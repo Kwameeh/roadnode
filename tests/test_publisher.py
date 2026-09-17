@@ -351,3 +351,61 @@ def test_full_outage_and_recovery_replays_backlog_oldest_first(outbox):
     assert [d["sequence"] for d in documents] == [1, 2, 3, 4, 5]
     assert all(d["replay"] is True for d in documents)
     assert [d["capturedAt"] for d in documents] == [iso(n) for n in range(1, 6)]
+
+
+def test_worker_reports_the_exact_broker_and_topic_it_publishes_to(outbox):
+    import threading
+    from dataclasses import replace
+
+    from car_telemetry.config import settings
+    from car_telemetry.publisher import worker
+    from car_telemetry.state import DeviceState
+
+    configured = replace(
+        settings(),
+        device_id=DEVICE,
+        mqtt_enabled=True,
+        mqtt_host="mqtt.obd2.ragnogroup.com",
+        mqtt_port=8883,
+        mqtt_tls=True,
+        mqtt_username="device-rn-0001",
+    )
+    state = DeviceState(DEVICE, "VEH-001", 1)
+    enqueue(outbox, 1)
+    stop = threading.Event()
+    broker = FakeBroker()
+    original = broker.publish
+
+    def publish_then_stop(*args, **kwargs):
+        stop.set()
+        return original(*args, **kwargs)
+
+    broker.publish = publish_then_stop
+    worker(configured, state, stop, outbox=outbox, transport=broker)
+
+    publisher = state.snapshot()["publisher"]
+    assert publisher["broker"] == "mqtt.obd2.ragnogroup.com:8883"
+    assert publisher["tls"] is True
+    assert publisher["clientId"] == DEVICE
+    assert publisher["username"] == "device-rn-0001"
+    assert publisher["topic"] == TOPIC
+    assert publisher["connected"] is True
+    assert publisher["published"] == 1
+    assert broker.received[0]["topic"] == publisher["topic"]
+
+
+def test_disabled_worker_says_why(outbox):
+    import threading
+    from dataclasses import replace
+
+    from car_telemetry.config import settings
+    from car_telemetry.publisher import worker
+    from car_telemetry.state import DeviceState
+
+    state = DeviceState(DEVICE, "VEH-001", 1)
+    worker(replace(settings(), mqtt_enabled=False), state, threading.Event(), outbox=outbox)
+    assert state.snapshot()["publisher"] == {
+        "enabled": False,
+        "connected": False,
+        "error": "MQTT_ENABLED is false",
+    }

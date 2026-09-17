@@ -1,4 +1,6 @@
 from dataclasses import replace
+from contextlib import nullcontext
+from types import SimpleNamespace
 
 from car_telemetry.config import settings
 from car_telemetry.obd_service import OBDService
@@ -22,6 +24,37 @@ class Response:
 
     def is_null(self):
         return self.null
+
+
+def test_dtc_scan_publishes_successful_scopes_and_never_claims_no_data_is_a_clear(tmp_path, monkeypatch):
+    class Commands(dict):
+        FREEZE_DTC = "freeze"
+
+    fake_obd = SimpleNamespace(commands=Commands(GET_DTC="stored", GET_CURRENT_DTC="pending"),
+        OBD=SimpleNamespace(query=lambda connection, command, force=False: connection.query(command, force=force)))
+    monkeypatch.setattr("car_telemetry.obd_service.obd", fake_obd)
+    values = {"stored": [("P0300", "Misfire")], "pending": None, "freeze": []}
+    connection = SimpleNamespace(paused=nullcontext, supports=lambda command: True,
+        query=lambda command, force=False: Response(values[command], null=values[command] is None))
+    observations = ObservationStore()
+    service = OBDService(replace(settings(), vehicle_profile_dir=str(tmp_path)), DeviceState("DEV-001", "VEH-001", 1), observations)
+    service.connection = connection
+    service.refresh_dtcs()
+    scan = observations.snapshot("2000-01-01T00:00:00Z", "2100-01-01T00:00:00Z").obd["dtc"]
+    assert scan["stored"] == ["P0300"]
+    assert "pending" not in scan
+    assert scan["quality"] == "valid"
+    values["stored"] = None
+    service.refresh_dtcs()
+    scan = observations.snapshot("2000-01-01T00:00:00Z", "2100-01-01T00:00:00Z").obd["dtc"]
+    assert scan["quality"] == "invalid"
+    assert "stored" not in scan and "pending" not in scan
+    values["stored"] = []
+    values["pending"] = []
+    service.refresh_dtcs()
+    scan = observations.snapshot("2000-01-01T00:00:00Z", "2100-01-01T00:00:00Z").obd["dtc"]
+    assert scan["stored"] == scan["pending"] == []
+    assert scan["quality"] == "valid"
 
 
 def test_obd_callback_normalizes_timestamp_unit_source_and_engine_state(tmp_path):

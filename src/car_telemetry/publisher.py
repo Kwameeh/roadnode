@@ -13,6 +13,7 @@ from .device_identity import (
     CredentialError,
     DeviceCredential,
     assert_publish_allowed,
+    topic_for,
 )
 from .observations import parse_utc, utc_iso, utc_now
 from .outbox import OutboxItem, SqliteOutbox
@@ -310,7 +311,14 @@ def worker(
 ) -> None:
     """Drain the outbox until stopped, reconnecting with backoff."""
     if not settings.mqtt_enabled or not settings.mqtt_host:
-        state.merge("publisher", {"enabled": False, "connected": False})
+        state.merge(
+            "publisher",
+            {
+                "enabled": False,
+                "connected": False,
+                "error": "MQTT_ENABLED is false" if not settings.mqtt_enabled else "MQTT_HOST is empty",
+            },
+        )
         return
 
     clock = now or (lambda: datetime.now(timezone.utc))
@@ -324,7 +332,20 @@ def worker(
         return PahoTransport(settings, resolved)
 
     backoff = 1.0
-    state.merge("publisher", {"enabled": True, "connected": False, "published": 0})
+    state.merge(
+        "publisher",
+        {
+            "enabled": True,
+            "connected": False,
+            "published": 0,
+            # Shown by the local web app so an installer can confirm the target.
+            "broker": f"{settings.mqtt_host}:{settings.mqtt_port}",
+            "tls": settings.mqtt_tls,
+            "clientId": settings.device_id,
+            "username": settings.mqtt_username,
+            "topic": topic_for(settings.device_id, "frame"),
+        },
+    )
     published_total = 0
 
     while not stop.is_set():

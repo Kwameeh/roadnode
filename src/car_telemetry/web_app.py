@@ -258,6 +258,11 @@ def signal_select(payload: dict = Body(default_factory=dict)):
     return proxy_post('/signals/select', payload)
 
 
+@app.post('/api/oled/qr')
+def oled_qr(payload: dict = Body(default_factory=dict)):
+    return proxy_post('/oled/qr', payload)
+
+
 @app.post('/api/obd/reconnect')
 def obd_reconnect(payload: dict = Body(default_factory=dict)):
     return proxy_post('/obd/reconnect', payload)

@@ -8,7 +8,7 @@ class DeviceState:
     def __init__(self, device_id, vehicle_id, stage):
         self.lock=threading.RLock()
         self.data={"agent":"starting","deviceId":device_id,"vehicleId":vehicle_id,"prototypeStage":stage,"startedAt":now(),
-                   "gps":{},"imu":{},"obd":{"signals":{},"supportedSignals":[],"selectedSignals":[]},"mqtt":{},"events":{},"system":{}}
+                   "gps":{},"imu":{},"obd":{"signals":{},"supportedSignals":[],"selectedSignals":[]},"publisher":{},"frame":{},"events":{},"system":{}}
     def merge(self, section, values):
         with self.lock:
             current=self.data.setdefault(section,{})
@@ -23,3 +23,15 @@ class DeviceState:
         with self.lock: self.data[key]=value; self.data['updatedAt']=now()
     def snapshot(self):
         with self.lock: return copy.deepcopy(self.data)
+
+
+def queue_depth(snapshot: dict) -> int:
+    """Frames waiting in the outbox. The frame builder reports it every second."""
+    for section in ('frame', 'publisher'):
+        depth = snapshot.get(section, {}).get('queueDepth')
+        if depth is not None:
+            try:
+                return max(0, int(depth))
+            except (TypeError, ValueError):
+                continue
+    return 0
