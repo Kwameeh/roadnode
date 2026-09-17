@@ -80,6 +80,20 @@ def _ip_address() -> str | None:
 
 LINK_REFRESH_SECONDS = 5.0
 
+# `vcgencmd get_throttled` bits: what is happening now, and what has happened since boot.
+THROTTLE_NOW = {0x1: 'under-voltage', 0x2: 'frequency capped', 0x4: 'throttled', 0x8: 'soft temperature limit'}
+THROTTLE_SINCE_BOOT = {0x10000: 'under-voltage', 0x20000: 'frequency capped', 0x40000: 'throttled', 0x80000: 'soft temperature limit'}
+
+
+def _throttled() -> int | None:
+    code, out, _ = run(['vcgencmd', 'get_throttled'], 2)
+    if code != 0 or '=' not in out:
+        return None
+    try:
+        return int(out.split('=', 1)[1].strip(), 16)
+    except ValueError:
+        return None
+
 
 def _wifi_ssid() -> str | None:
     try:
@@ -118,7 +132,11 @@ def worker(
     links_checked: float | None = None
     while not stop.is_set():
         if links_checked is None or time.monotonic() - links_checked >= LINK_REFRESH_SECONDS:
-            links = {'wifiSsid': _wifi_ssid(), 'bluetoothDevice': _bluetooth_device()}
+            links = {
+                'wifiSsid': _wifi_ssid(),
+                'bluetoothDevice': _bluetooth_device(),
+                'throttled': _throttled(),
+            }
             links_checked = time.monotonic()
         current = _cpu_snapshot()
         mem = _meminfo()
@@ -135,6 +153,12 @@ def worker(
             'memoryAvailableMb': round(mem.get('MemAvailable', 0.0), 1) if mem else None,
             'memoryUsedMb': (
                 round(mem.get('MemTotal', 0.0) - mem.get('MemAvailable', 0.0), 1)
+                if mem
+                else None
+            ),
+            'swapTotalMb': round(mem.get('SwapTotal', 0.0), 1) if mem else None,
+            'swapUsedMb': (
+                round(mem.get('SwapTotal', 0.0) - mem.get('SwapFree', 0.0), 1)
                 if mem
                 else None
             ),

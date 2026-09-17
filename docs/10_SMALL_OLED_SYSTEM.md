@@ -10,20 +10,30 @@ seven full rows of data.
 
 ## Rotating pages
 
-Five pages rotate every `OLED_PAGE_SECONDS` (**20 s** by default; 20–30 s
-leaves time to read each one). Every page has the same status row on top:
+The pages rotate in this order. The main dashboard shows for
+`OLED_DASHBOARD_SECONDS` (**60 s**), every other page for `OLED_PAGE_SECONDS`
+(**20 s**), so one full cycle takes 3 min 20 s:
+
+| # | Page | Time |
+|---|---|---|
+| 1 | Dashboard | 60 s |
+| 2 | Overview | 20 s |
+| 3 | OBD-II | 20 s |
+| 4 | GPS | 20 s |
+| 5 | IMU | 20 s |
+| 6 | Cloud & network | 20 s |
+| 7 | Raspberry Pi health | 20 s |
+| 8 | Web app QR code | 20 s (skipped without a network address) |
+
+Pages 1-7 share the status row on top: icons for OBD, GPS (with satellite
+count), cloud, Wi-Fi, Bluetooth and IMU (steady = working, blinking = problem,
+`-` = disabled or not used). The dashboard shows the Pi temperature on the
+right; the other pages show dots marking which page is up.
+
+### 1. Dashboard
 
 ```text
-🚗 📍9 ☁ WiFi BT IMU            ■····
-```
-
-- icons for OBD, GPS (with satellite count), cloud, Wi-Fi, Bluetooth and IMU:
-  steady = working, blinking = problem, `-` = disabled or not used;
-- the dots on the right show which of the five pages is up.
-
-### 1. Overview
-
-```text
+🚗 📍9 ☁ WiFi BT IMU          47°C
  72   ⟳2450 🌡91°
       ⚡13.9V 💧64%
 KM/H  ⚠0 ⇪0            ACTIVE
@@ -40,7 +50,23 @@ bottom line takes turns between the web address and any problems, for example
 `!OBD BT I/O ERROR`, `!CLOUD TLS CERT FAILED`, `!NO NETWORK - JOIN WIFI`,
 `!IMU CAL 64% KEEP STILL`.
 
-### 2. OBD-II
+### 2. Overview
+
+```text
+🚗OBD ✓            BT 2450RPM
+📍GPS ✓        9 SAT HDOP 0.9
+IMU ✓                   0.04G
+☁CLOUD ✓         Q0 SENT 1200
+WiFi ✓          ROADNODE-WIFI
+BT ✓                    OBDII
+🌡PI ✓               18% 47°C
+```
+
+One health line per part of the system. When something is wrong the mark
+turns to ✗ and the right side says why (`NO ECU/IGN OFF`, `NO FIX 3 SAT`,
+`TIMEOUT`, `NO NETWORK`, `!LOW VOLTS`).
+
+### 3. OBD-II
 
 ```text
 🚗OBD-II ✓                BT
@@ -57,7 +83,7 @@ temperature, fuel level, mass air flow, voltage (ECU, or the adapter's own
 reading when the ECU does not report it) and stored DTC count. The last row
 shows the VIN (or protocol), or the connection error when OBD is down.
 
-### 3. GPS
+### 4. GPS
 
 ```text
 📍GPS ✓ FIX            9 SAT
@@ -75,7 +101,7 @@ arriving, serial port and baud, and an accuracy grade from HDOP. Position,
 altitude and HDOP are hidden once the fix is lost. The last row explains
 problems: port closed, no NMEA data (check the TX wire), or needs sky view.
 
-### 4. IMU
+### 5. IMU
 
 ```text
 IMU ✓ MPU6050           0X68
@@ -92,21 +118,51 @@ temperature, I2C address, calibration state (or progress while calibrating)
 with mounting orientation, and active driving events (`IMPACT`, `BRAKE`,
 `ACCEL`, `CORNER`) or the sensor error.
 
-### 5. System and cloud
+### 6. Cloud & network
 
 ```text
 ☁CLOUD ✓                  ⇪0
 OBD2.RAGNOGROUP.COM
 8883 TLS           SENT 1200
+REPLAY 0            REJECT 0
 WiFi ROADNODE-WIFI  ROADNODE
 192.168.1.42:8080
-CPU 18% 47°C       UP 2H14M
-RAM 204/416M     SD 4.8/15G
+DROPPED 0        OUTBOX 0.0M
 ```
 
-EMQX broker, port and TLS, frames sent and queued (or the connection error),
-Wi-Fi network and hostname, web address, CPU load and temperature, uptime,
-memory used/total and SD card used/total.
+EMQX broker, port and TLS, frames sent, replayed and rejected (or the
+connection error), queue count, Wi-Fi network, hostname, web address, dropped
+frames and outbox size.
+
+### 7. Raspberry Pi health
+
+```text
+PI ROADNODE         UP 2H14M
+CPU 18%       [███░░░░░░░░]
+RAM 49%       [█████░░░░░░]
+SD 33%        [████░░░░░░░]
+🌡47°C         [██████░░░░░]
+RAM 204/416M     SD 4.8/15G
+LOAD 0.42 /4           PWR ✓
+```
+
+Bar graphs for CPU, RAM, SD card use and CPU temperature (full at 85 °C, where
+the Pi throttles), RAM and SD used/total, uptime, 1-minute load average with
+the core count, and power status from `vcgencmd get_throttled`:
+
+| Status | Meaning |
+|---|---|
+| `PWR ✓` | No power or thermal problems since boot |
+| `!LOW VOLTS` | Under-voltage right now: use a better supply or cable |
+| `!THROTTLED` / `!HOT LIMIT` / `!CPU CAPPED` | The Pi is slowing down now |
+| `LOW V SEEN` / `THROTL SEEN` | It happened earlier since boot |
+
+### 8. Web app QR code
+
+A scannable `http://<pi-ip>:<WEB_PORT>` code on the left, and the address and
+Wi-Fi name on the right. It is also shown at boot for `OLED_ACCESS_SECONDS`
+(20 s, `0` to skip) and for 60 s on request: **System → Show web app QR on
+display** in the web app, or `telemetry oled-qr --seconds 60`.
 
 ## Alerts
 
@@ -114,18 +170,6 @@ A possible impact or coolant ≥ 110 °C draws an inverted banner over the top
 three data rows of whichever page is showing (`IMPACT` / `HOT 112°`). The
 status row and the lower rows stay visible. Alerts are never hidden behind the
 QR screen.
-
-## Web app QR code
-
-The QR screen shows a scannable `http://<pi-ip>:<WEB_PORT>` code on the left
-and the address and Wi-Fi name on the right. It is not part of the rotation. It
-appears:
-
-- at boot, for `OLED_ACCESS_SECONDS` (20 s by default, `0` to skip);
-- on request for 60 s: **System → Show web app QR on display** in the web app,
-  or `telemetry oled-qr --seconds 60`.
-
-Without a network address there is no link, so the pages keep rotating.
 
 ## Burn-in
 
