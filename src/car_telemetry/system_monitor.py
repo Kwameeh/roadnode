@@ -17,7 +17,7 @@ from .observations import (
     observation_meta,
     utc_now,
 )
-from .state import DeviceState
+from .state import DeviceState, queue_depth
 
 
 def _meminfo() -> dict[str, float]:
@@ -151,11 +151,11 @@ def worker(
         except Exception:
             pass
         state.merge('system', payload)
-        mqtt_state = state.snapshot().get('mqtt', {})
+        snapshot = state.snapshot()
         device_observation = {
             'temperatureC': payload.get('temperatureC'),
             'network': 'connected' if payload.get('ipAddress') else 'offline',
-            'queueDepth': max(0, int(mqtt_state.get('bufferedMessages', 0) or 0)),
+            'queueDepth': queue_depth(snapshot),
             'softwareVersion': _software_version(),
             **observation_meta(
                 observed_at=observed_at,

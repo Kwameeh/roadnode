@@ -19,7 +19,8 @@ dependencies = [
   "adafruit-blinka>=8",
   "adafruit-circuitpython-mpu6050>=1.2",
   "luma.oled>=3.13,<4",
-  "Pillow>=10,<12"
+  "Pillow>=10,<12",
+  "qrcode>=7.4,<9"
 ]
 
 [project.optional-dependencies]

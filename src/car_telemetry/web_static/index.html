@@ -139,14 +139,28 @@
           <div><dt>IP address</dt><dd id="sys-ip">--</dd></div>
           <div><dt>Uptime</dt><dd id="sys-uptime">--</dd></div>
           <div><dt>Agent</dt><dd id="sys-agent">--</dd></div>
-          <div><dt>MQTT buffer</dt><dd id="mqtt-buffer">--</dd></div>
           <div><dt>OLED</dt><dd id="oled-status">--</dd></div>
+        </dl>
+        <div class="button-row">
+          <button id="show-oled-qr">Show web app QR on display</button>
+        </div>
+      </div>
+
+      <div class="card details">
+        <h2>Cloud (EMQX)</h2>
+        <dl>
+          <div><dt>Status</dt><dd id="cloud-status">--</dd></div>
+          <div><dt>Broker</dt><dd id="cloud-broker" class="mono">--</dd></div>
+          <div><dt>Client ID</dt><dd id="cloud-client" class="mono">--</dd></div>
+          <div><dt>Username</dt><dd id="cloud-username" class="mono">--</dd></div>
+          <div><dt>Topic</dt><dd id="cloud-topic" class="mono">--</dd></div>
+          <div><dt>Frames</dt><dd id="cloud-frames">--</dd></div>
         </dl>
       </div>
     </section>
   </main>
 
   <div id="toast" class="toast"></div>
-  <script src="/static/app.js?v=5"></script>
+  <script src="/static/app.js?v=6"></script>
 </body>
 </html>

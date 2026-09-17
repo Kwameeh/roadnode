@@ -26,6 +26,9 @@ def env_candidates(explicit: str | None = None) -> list[Path]:
     paths.extend(
         [
             Path.cwd() / "config" / "telemetry.env",
+            # Documented install locations, so `telemetry ...` works from any directory.
+            Path.home() / "roadnode-platform" / "roadnode" / "config" / "telemetry.env",
+            Path.home() / "roadnode" / "config" / "telemetry.env",
             Path.home() / "car-telemetry" / "config" / "telemetry.env",
             Path("/etc/car-telemetry/telemetry.env"),
         ]

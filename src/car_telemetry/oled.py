@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import socket
 import threading
 import time
@@ -7,29 +8,23 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
+from . import oled_font as F
 from .config import Settings
-from .state import DeviceState
+from .state import DeviceState, queue_depth
 
-PAGES = ('access', 'drive', 'location', 'health', 'connectivity')
+# One constant dashboard. The QR screen only replaces it at boot and when
+# asked for (`telemetry oled-qr` or the web app), so nothing rotates.
+PAGES = ('dashboard', 'qr')
 
-
-def _font(size: int, bold: bool = False):
-    names = ('DejaVuSans-Bold.ttf', 'DejaVuSans.ttf') if bold else ('DejaVuSans.ttf',)
-    for name in names:
-        try:
-            return ImageFont.truetype(name, size)
-        except OSError:
-            continue
-    return ImageFont.load_default()
-
-
-SMALL_FONT = _font(9)
-BODY_FONT = _font(11)
-BODY_BOLD = _font(11, bold=True)
-VALUE_FONT = _font(27, bold=True)
-SPLASH_FONT = _font(20, bold=True)
+STATUS_Y = 0
+ROW_Y = tuple(9 + F.LINE * index for index in range(7))  # 9, 17, ... 57
+SPEED_WIDTH = 36
+RIGHT_X = 40
+BOTTOM_LINE_SECONDS = 3
+BURN_IN_SHIFT_SECONDS = 30
+COMPASS = ('N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW')
 
 
 def signal_value(signal: Any, default: Any = None):
@@ -46,137 +41,357 @@ def number(value: Any, digits: int = 0, default: str = '--') -> str:
         return default
 
 
-def _center(draw: ImageDraw.ImageDraw, text: str, y: int, font, width: int, fill: int = 255):
-    box = draw.textbbox((0, 0), text, font=font)
-    draw.text(((width - (box[2] - box[0])) // 2, y), text, font=font, fill=fill)
+def _float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
-def _fit(draw: ImageDraw.ImageDraw, text: str, font, width: int) -> str:
-    if draw.textlength(text, font=font) <= width:
-        return text
-    while text and draw.textlength(text + '..', font=font) > width:
-        text = text[:-1]
-    return text + '..'
+# Known failure messages, in check order, reduced to something that fits one line.
+_ERROR_PATTERNS = (
+    (r'certificate verify failed|ssl|tls', 'TLS CERT FAILED'),
+    (r'mqtt_username|credential', 'NO CREDENTIALS'),
+    (r'not authori[sz]ed|bad user name|password|auth', 'AUTH REJECTED'),
+    (r'name or service not known|getaddrinfo|temporary failure in name', 'DNS FAILED'),
+    (r'network is unreachable|no route to host', 'NO ROUTE'),
+    (r'connection refused', 'REFUSED'),
+    (r'timed out|timeout', 'TIMEOUT'),
+    (r'car_connected', 'NO ECU - IGNITION ON?'),
+    (r'input/output error', 'BT I/O ERROR'),
+    (r'rfcomm|no such file', 'NO RFCOMM0 LINK'),
+    (r'no obd port|no usb|not found', 'ADAPTER NOT FOUND'),
+    (r'permission denied', 'PERMISSION DENIED'),
+    (r'could not open port|serial', 'PORT NOT OPEN'),
+)
 
 
-def _header(draw: ImageDraw.ImageDraw, title: str, snapshot: dict, width: int, shift: int):
+def short_error(message: Any, fallback: str) -> str:
+    text = str(message or '').strip()
+    if not text:
+        return fallback
+    lowered = text.lower()
+    for pattern, label in _ERROR_PATTERNS:
+        if re.search(pattern, lowered):
+            return label
+    return re.sub(r'\s+', ' ', text).upper()
+
+
+def problems(snapshot: dict) -> list[str]:
+    """Most important first. Each entry is one bottom-line message."""
     obd = snapshot.get('obd', {})
     gps = snapshot.get('gps', {})
-    mqtt = snapshot.get('mqtt', {})
-    draw.text((shift, 0), title, font=SMALL_FONT, fill=255)
-    flags = f"O{'+' if obd.get('connected') else '-'} G{'+' if gps.get('validFix') else '-'} M{'+' if mqtt.get('connected') else '-'}"
-    box = draw.textbbox((0, 0), flags, font=SMALL_FONT)
-    draw.text((width - (box[2] - box[0]) - shift, 0), flags, font=SMALL_FONT, fill=255)
-    draw.line((shift, 11, width - 1 - shift, 11), fill=96)
+    imu = snapshot.get('imu', {})
+    publisher = snapshot.get('publisher', {})
+    system = snapshot.get('system', {})
+    found: list[str] = []
+
+    if system and not system.get('ipAddress'):
+        found.append('NO NETWORK - JOIN WIFI')
+    if obd.get('enabled') is not False and not obd.get('connected'):
+        if obd.get('connecting'):
+            found.append(f"OBD CONNECTING {str(obd.get('transport') or '').upper()}".strip())
+        else:
+            found.append('OBD ' + short_error(obd.get('error'), 'WAITING'))
+    if publisher.get('enabled') and not publisher.get('connected'):
+        found.append('CLOUD ' + short_error(publisher.get('error'), 'CONNECTING'))
+    if gps.get('enabled') and gps.get('serialOpen') is False:
+        found.append('GPS ' + short_error(gps.get('error'), 'PORT CLOSED'))
+    elif gps.get('enabled') and gps.get('serialOpen') and not gps.get('received'):
+        found.append('GPS NO DATA - CHECK TX')
+    if imu.get('enabled') and imu.get('calibrationState') not in (None, 'valid'):
+        if imu.get('calibrating') or imu.get('calibrationState') == 'running':
+            found.append(f"IMU CAL {number(imu.get('calibrationPercent'))}% KEEP STILL")
+        else:
+            found.append('IMU ' + short_error(imu.get('error'), str(imu.get('calibrationState')).upper()))
+    return found
 
 
 def _alert(snapshot: dict) -> tuple[str, str] | None:
     events = snapshot.get('events', {})
     if events.get('possibleImpact'):
-        return 'IMPACT', 'Check vehicle safely'
-    coolant = signal_value(snapshot.get('obd', {}).get('signals', {}).get('COOLANT_TEMP'))
-    try:
-        if float(coolant) >= 110:
-            return 'TEMP WARNING', f'Coolant {number(coolant)} C'
-    except (TypeError, ValueError):
-        pass
+        return 'IMPACT', 'CHECK VEHICLE SAFELY'
+    coolant = _float(signal_value(snapshot.get('obd', {}).get('signals', {}).get('COOLANT_TEMP')))
+    if coolant is not None and coolant >= 110:
+        return f'HOT {coolant:.0f}{F.DEGREE}', 'STOP WHEN SAFE'
     return None
 
 
-def render_frame(
+def _right(draw: ImageDraw.ImageDraw, text: str, y: int, width: int, fill: int = 255):
+    F.draw_text(draw, (width - 1 - F.text_width(text), y), text, fill=fill)
+
+
+def _status_row(draw: ImageDraw.ImageDraw, snapshot: dict, width: int, x: int, blink_on: bool):
+    obd = snapshot.get('obd', {})
+    gps = snapshot.get('gps', {})
+    imu = snapshot.get('imu', {})
+    publisher = snapshot.get('publisher', {})
+    system = snapshot.get('system', {})
+
+    def item(icon: str, state: str, suffix: str = ''):
+        """state: ok (steady), bad (blinks), off (a dash: disabled or not used)."""
+        nonlocal x
+        if state == 'off':
+            x = F.draw_text(draw, (x, STATUS_Y), '-')
+        elif state == 'ok' or blink_on:
+            x = F.draw_text(draw, (x, STATUS_Y), icon)
+        else:
+            x += F.text_width(icon) + 1
+        if suffix:
+            x = F.draw_text(draw, (x, STATUS_Y), suffix)
+        x += 2
+
+    item(F.CAR, 'off' if obd.get('enabled') is False else 'ok' if obd.get('connected') else 'bad')
+    sats = gps.get('satellites')
+    item(
+        F.PIN,
+        'off' if gps.get('enabled') is False else 'ok' if gps.get('validFix') else 'bad',
+        str(sats) if sats is not None else '',
+    )
+    item(F.CLOUD, 'off' if not publisher.get('enabled') else 'ok' if publisher.get('connected') else 'bad')
+    item(F.WIFI, 'ok' if system.get('ipAddress') else 'bad')
+    item(F.BT, 'ok' if system.get('bluetoothDevice') else 'off')
+    item(
+        F.AXES,
+        'off' if imu.get('enabled') is False else 'ok' if imu.get('calibrationState') == 'valid' else 'bad',
+    )
+
+    temperature = _float(system.get('temperatureC'))
+    if temperature is not None:
+        _right(draw, f'{temperature:.0f}{F.DEGREE}C', STATUS_Y, width)
+
+
+def _speed(snapshot: dict) -> tuple[str, str]:
+    obd = snapshot.get('obd', {})
+    gps = snapshot.get('gps', {})
+    if obd.get('connected'):
+        speed = _float(signal_value(obd.get('signals', {}).get('SPEED')))
+        if speed is not None:
+            return f'{speed:.0f}', 'KM/H'
+    if gps.get('validFix') and _float(gps.get('speedKph')) is not None:
+        return f"{float(gps['speedKph']):.0f}", 'GPS'
+    return '--', 'KM/H'
+
+
+def _location_line(gps: dict, width: int) -> str:
+    if gps.get('enabled') is False:
+        return f'{F.PIN}GPS OFF'
+    if not gps.get('validFix'):
+        sats = gps.get('satellites')
+        detail = f'{sats} SATS' if sats is not None else 'NO DATA' if not gps.get('received') else ''
+        return f'{F.PIN}NO FIX {detail}'.rstrip()
+    heading = _float(gps.get('headingDegrees'))
+    suffix = ''
+    if heading is not None:
+        suffix = f' {heading:.0f}{F.DEGREE}{COMPASS[int((heading % 360) / 45 + 0.5) % 8]}'
+    for digits in (4, 3, 2):
+        line = f"{F.PIN}{number(gps.get('latitude'), digits)},{number(gps.get('longitude'), digits)}"
+        if F.text_width(line + suffix) <= width - 2:
+            return line + suffix
+    return line
+
+
+def _uptime(seconds: Any) -> str:
+    value = _float(seconds)
+    if value is None:
+        return ''
+    hours, minutes = int(value // 3600), int(value % 3600 // 60)
+    return f'{hours // 24}D{hours % 24}H' if hours >= 24 else f'{hours}H{minutes:02d}M'
+
+
+def _imu_text(imu: dict) -> str:
+    if imu.get('enabled') is False:
+        return f'{F.AXES}OFF'
+    state = imu.get('calibrationState')
+    if state == 'valid':
+        g = _float(imu.get('resultantG'))
+        return f'{F.AXES}{F.CHECK}' + (f' {g:.2f}G' if g is not None else '')
+    if imu.get('calibrating') or state == 'running':
+        return f"{F.AXES}CAL {number(imu.get('calibrationPercent'))}%"
+    return f'{F.AXES}{F.CROSS}' + (f' {str(state).upper()}' if state else '')
+
+
+def render_dashboard(
     snapshot: dict,
-    page: str,
     width: int = 128,
     height: int = 64,
     shift: int = 0,
     web_port: int = 8080,
+    tick: int = 0,
 ) -> Image.Image:
     image = Image.new('1', (width, height))
     draw = ImageDraw.Draw(image)
+    # Every glyph leaves its right-hand column blank, so a 1px shift never clips.
     shift = max(0, min(1, shift))
-    alert = _alert(snapshot)
-    if alert:
-        draw.rectangle((0, 0, width - 1, height - 1), outline=255)
-        _center(draw, alert[0], 11, BODY_BOLD, width)
-        _center(draw, alert[1], 32, BODY_FONT, width)
-        _center(draw, 'STOP WHEN SAFE', 49, SMALL_FONT, width)
-        return image
-
+    usable = width - shift
     obd = snapshot.get('obd', {})
     gps = snapshot.get('gps', {})
-    mqtt = snapshot.get('mqtt', {})
     system = snapshot.get('system', {})
     signals = obd.get('signals', {})
+    frame = snapshot.get('frame', {})
 
-    if page == 'access':
-        _header(draw, 'WEB APP', snapshot, width, shift)
-        ip = system.get('ipAddress')
-        hostname = system.get('hostname') or socket.gethostname()
-        lines = (
-            f'{ip}:{web_port}' if ip else 'NO NETWORK',
-            f'{hostname}.local:{web_port}',
-            f"WiFi {system.get('wifiSsid') or '--'}",
-            f"BT   {system.get('bluetoothDevice') or '--'}",
-        )
-        for index, text in enumerate(lines):
-            draw.text((shift, 14 + index * 12), _fit(draw, text, SMALL_FONT, width - shift), font=SMALL_FONT, fill=255)
-        return image
+    _status_row(draw, snapshot, width, shift, blink_on=tick % 2 == 0)
 
-    if page == 'drive':
-        _header(draw, 'DRIVE', snapshot, width, shift)
-        if not obd.get('connected'):
-            _center(draw, 'WAITING', 19, SPLASH_FONT, width)
-            _center(draw, f"OBD {str(obd.get('transport') or 'AUTO').upper()}", 46, SMALL_FONT, width)
-            return image
-        speed = number(signal_value(signals.get('SPEED')))
-        _center(draw, speed, 12, VALUE_FONT, width)
-        _center(draw, 'km/h', 39, SMALL_FONT, width)
+    alert = _alert(snapshot)
+    if alert:
+        draw.rectangle((0, ROW_Y[0] - 1, width - 1, ROW_Y[3] - 2), fill=255)
+        title = F.fit(alert[0], width - 4, scale=2)
+        F.draw_text(draw, ((width - F.text_width(title, 2)) // 2, ROW_Y[0]), title, fill=0, scale=2)
+        F.draw_text(draw, ((width - F.text_width(alert[1])) // 2, ROW_Y[2] - 1), alert[1], fill=0)
+    else:
+        speed, unit = _speed(snapshot)
+        F.draw_text(draw, (shift + SPEED_WIDTH - F.text_width(speed, 2), ROW_Y[0]), speed, scale=2)
+        F.draw_text(draw, (shift, ROW_Y[2]), unit)
+
         rpm = number(signal_value(signals.get('RPM')))
         coolant = number(signal_value(signals.get('COOLANT_TEMP')))
-        _center(draw, f'RPM {rpm}   COOL {coolant}C', 51, SMALL_FONT, width)
-        return image
-
-    if page == 'location':
-        _header(draw, 'LOCATION', snapshot, width, shift)
-        if not gps.get('validFix'):
-            _center(draw, 'NO GPS FIX', 22, BODY_BOLD, width)
-            _center(draw, 'Searching for satellites', 43, SMALL_FONT, width)
-            return image
-        draw.text((shift, 16), f"FIX  SAT {gps.get('satellites', '--')}", font=BODY_BOLD, fill=255)
-        draw.text((shift, 30), f"HDG {number(gps.get('headingDegrees'))} deg", font=BODY_FONT, fill=255)
-        draw.text((shift, 44), f"{number(gps.get('latitude'), 4)}", font=SMALL_FONT, fill=255)
-        draw.text((64, 44), f"{number(gps.get('longitude'), 4)}", font=SMALL_FONT, fill=255)
-        return image
-
-    if page == 'health':
-        _header(draw, 'VEHICLE HEALTH', snapshot, width, shift)
-        dtc = obd.get('dtc', {})
-        voltage = number(signal_value(signals.get('CONTROL_MODULE_VOLTAGE')), 1)
-        coolant = number(signal_value(signals.get('COOLANT_TEMP')))
+        volts = number(signal_value(signals.get('CONTROL_MODULE_VOLTAGE')), 1)
         fuel = number(signal_value(signals.get('FUEL_LEVEL')))
-        draw.text((shift, 16), f'VOLT  {voltage} V', font=BODY_FONT, fill=255)
-        draw.text((shift, 30), f'COOL  {coolant} C', font=BODY_FONT, fill=255)
-        draw.text((shift, 44), f"FUEL  {fuel}%   DTC {dtc.get('storedCount', 0)}", font=BODY_FONT, fill=255)
-        return image
+        F.draw_text(draw, (shift + RIGHT_X, ROW_Y[0]), f'{F.RPM}{rpm} {F.THERMO}{coolant}{F.DEGREE}')
+        F.draw_text(draw, (shift + RIGHT_X, ROW_Y[1]), f'{F.BOLT}{volts}V {F.FUEL}{fuel}%')
 
-    _header(draw, 'CONNECTIVITY', snapshot, width, shift)
-    draw.text((shift, 15), f"OBD   {'ONLINE' if obd.get('connected') else 'WAITING'}", font=BODY_FONT, fill=255)
-    draw.text((shift, 28), f"GPS   {'FIX' if gps.get('validFix') else 'SEARCHING'}", font=BODY_FONT, fill=255)
-    queued = mqtt.get('bufferedMessages', 0)
-    draw.text((shift, 41), f"CLOUD {'ONLINE' if mqtt.get('connected') else 'OFFLINE'} Q{queued}", font=BODY_FONT, fill=255)
-    ip = system.get('ipAddress') or f'{socket.gethostname()}.local'
-    draw.text((shift, 54), str(ip)[:21], font=SMALL_FONT, fill=255)
+        dtc = obd.get('dtc', {}).get('storedCount')
+        mode = str(frame.get('mode') or '').upper()
+        F.draw_text(
+            draw,
+            (shift + RIGHT_X, ROW_Y[2]),
+            f"{F.WARN}{dtc if dtc is not None else '-'} {F.UPLOAD}{queue_depth(snapshot)}",
+        )
+        if mode:
+            _right(draw, mode, ROW_Y[2], usable)
+
+    F.draw_text(draw, (shift, ROW_Y[3]), F.fit(_location_line(gps, usable), usable))
+
+    ssid = system.get('wifiSsid') or ('LAN' if system.get('ipAddress') else '--')
+    F.draw_text(draw, (shift, ROW_Y[4]), F.fit(f'{F.WIFI}{ssid}', 62))
+    bt_name = system.get('bluetoothDevice') or str(obd.get('transport') or '--')
+    bt_text = F.fit(f'{F.BT}{bt_name}', usable - 66)
+    _right(draw, bt_text, ROW_Y[4], usable)
+
+    F.draw_text(draw, (shift, ROW_Y[5]), F.fit(_imu_text(snapshot.get('imu', {})), 62))
+    cpu = _float(system.get('cpuPercent'))
+    right = ' '.join(part for part in (f'{cpu:.0f}%' if cpu is not None else '', _uptime(system.get('uptimeSeconds'))) if part)
+    if right:
+        _right(draw, right, ROW_Y[5], usable)
+
+    F.draw_text(draw, (shift, ROW_Y[6]), F.fit(bottom_line(snapshot, web_port, tick), usable))
     return image
+
+
+def web_address(snapshot: dict, web_port: int) -> str | None:
+    ip = snapshot.get('system', {}).get('ipAddress')
+    return f'{ip}:{web_port}' if ip else None
+
+
+def bottom_line(snapshot: dict, web_port: int, tick: int = 0) -> str:
+    """The web address when healthy; otherwise problems take turns with it."""
+    messages = [f'!{message}' for message in problems(snapshot)]
+    address = web_address(snapshot, web_port)
+    if address:
+        messages.append(address)
+    if not messages:
+        return f"{snapshot.get('system', {}).get('hostname') or socket.gethostname()}.LOCAL:{web_port}"
+    return messages[(tick // BOTTOM_LINE_SECONDS) % len(messages)]
+
+
+def web_url(snapshot: dict, web_port: int) -> str | None:
+    address = web_address(snapshot, web_port)
+    return f'http://{address}' if address else None
+
+
+def qr_matrix(data: str) -> list[list[bool]]:
+    import qrcode
+    from qrcode.constants import ERROR_CORRECT_L, ERROR_CORRECT_M
+
+    for correction in (ERROR_CORRECT_M, ERROR_CORRECT_L):
+        code = qrcode.QRCode(error_correction=correction, border=0, box_size=1)
+        code.add_data(data)
+        code.make(fit=True)
+        matrix = code.get_matrix()
+        # Keep modules 2px wide on a 64px-tall display: phones cannot read 1px.
+        if len(matrix) * 2 + 4 <= 64:
+            return matrix
+    return matrix
+
+
+def render_qr(snapshot: dict, width: int = 128, height: int = 64, web_port: int = 8080) -> Image.Image | None:
+    url = web_url(snapshot, web_port)
+    if url is None:
+        return None
+    image = Image.new('1', (width, height))
+    draw = ImageDraw.Draw(image)
+
+    matrix = qr_matrix(url)
+    size = len(matrix)
+    scale = max(1, min((height - 4) // size, 2 if size * 2 + 4 <= height else 1))
+    side = size * scale
+    # A lit square is the QR quiet zone; modules are dark pixels on it.
+    draw.rectangle((0, 0, height - 1, height - 1), fill=255)
+    left = top = (height - side) // 2
+    for row_index, row in enumerate(matrix):
+        for col_index, dark in enumerate(row):
+            if dark:
+                x = left + col_index * scale
+                y = top + row_index * scale
+                draw.rectangle((x, y, x + scale - 1, y + scale - 1), fill=0)
+
+    x = height + 3
+    column = width - x
+    system = snapshot.get('system', {})
+    address = web_address(snapshot, web_port) or ''
+    lines = ['SCAN FOR', 'WEB APP', '']
+    # Wrap the address at the dots so the IP stays readable.
+    current = ''
+    for part in re.split(r'(?<=[.:])', address):
+        if current and F.text_width(current + part) > column:
+            lines.append(current)
+            current = part
+        else:
+            current += part
+    if current:
+        lines.append(current)
+    lines.append('')
+    lines.append(f"{F.WIFI}{system.get('wifiSsid') or 'LAN'}")
+    for index, line in enumerate(lines[:8]):
+        F.draw_text(draw, (x, index * F.LINE), F.fit(line, column))
+    return image
+
+
+def render_frame(
+    snapshot: dict,
+    page: str = 'dashboard',
+    width: int = 128,
+    height: int = 64,
+    shift: int = 0,
+    web_port: int = 8080,
+    tick: int = 0,
+) -> Image.Image:
+    if page == 'qr' and not _alert(snapshot):
+        image = render_qr(snapshot, width, height, web_port)
+        if image is not None:
+            return image
+    return render_dashboard(snapshot, width, height, shift, web_port, tick)
 
 
 def splash_frame(width: int, height: int, device_id: str) -> Image.Image:
     image = Image.new('1', (width, height))
     draw = ImageDraw.Draw(image)
     draw.rectangle((0, 0, width - 1, height - 1), outline=255)
-    _center(draw, 'ROADNODE', 12, SPLASH_FONT, width)
-    _center(draw, 'VEHICLE TELEMETRY', 36, SMALL_FONT, width)
-    _center(draw, device_id[:20], 49, SMALL_FONT, width)
+    title = 'ROADNODE'
+    F.draw_text(draw, ((width - F.text_width(title, 2)) // 2, 14), title, scale=2)
+    subtitle = 'VEHICLE TELEMETRY'
+    F.draw_text(draw, ((width - F.text_width(subtitle)) // 2, 36), subtitle)
+    ident = F.fit(device_id, width - 8)
+    F.draw_text(draw, ((width - F.text_width(ident)) // 2, 48), ident)
     return image
+
+
+def current_page(snapshot: dict, elapsed: float, boot_qr_seconds: float, now: float) -> str:
+    """QR while the boot window is open or a request is active, else the dashboard."""
+    requested_until = _float(snapshot.get('oled', {}).get('qrUntil'))
+    if elapsed < boot_qr_seconds or (requested_until is not None and now < requested_until):
+        return 'qr'
+    return 'dashboard'
 
 
 class OLEDDisplay:
@@ -239,35 +454,33 @@ def worker(settings: Settings, state: DeviceState, stop: threading.Event):
                     continue
 
                 elapsed = max(0.0, time.monotonic() - started)
-                page_seconds = max(1.0, settings.oled_page_seconds)
-                if elapsed < settings.oled_access_seconds:
-                    # Boot: keep the web app address and links up long enough to read.
-                    page = 'access'
-                else:
-                    carousel = elapsed - settings.oled_access_seconds
-                    page = PAGES[int(carousel / page_seconds) % len(PAGES)]
                 snapshot = state.snapshot()
+                page = current_page(snapshot, elapsed, settings.oled_access_seconds, time.time())
                 frame = render_frame(
                     snapshot,
                     page,
                     settings.oled_width,
                     settings.oled_height,
-                    shift=int(elapsed / page_seconds) % 2,
+                    shift=int(elapsed / BURN_IN_SHIFT_SECONDS) % 2,
                     web_port=settings.web_port,
+                    tick=int(elapsed),
                 )
                 oled.show(frame)
+                shown = 'alert' if _alert(snapshot) else page
+                if page == 'qr' and web_url(snapshot, settings.web_port) is None:
+                    shown = 'dashboard'
                 state.merge(
                     'oled',
                     {
                         'connected': True,
                         'driver': settings.oled_driver,
-                        'page': 'alert' if _alert(snapshot) else page,
+                        'page': shown,
                         'lastFrameAt': datetime.now(timezone.utc).isoformat(),
                         'error': None,
                     },
                 )
                 last_page = page
-                stop.wait(min(0.5, max(0.2, settings.oled_page_seconds)))
+                stop.wait(0.5)
             except Exception as exc:
                 state.merge(
                     'oled',
@@ -287,14 +500,14 @@ def worker(settings: Settings, state: DeviceState, stop: threading.Event):
             pass
 
 
-def test_display(settings: Settings, driver: str | None = None, seconds: float = 3.0) -> None:
-    selected = replace(settings, oled_enabled=True, oled_driver=driver or settings.oled_driver)
-    oled = OLEDDisplay(selected)
-    sample = {
-        'deviceId': selected.device_id,
+def sample_snapshot(device_id: str = 'PROTO-001', web_port: int = 8080) -> dict:
+    """A healthy vehicle, used by `telemetry oled-test` and the preview images."""
+    return {
+        'deviceId': device_id,
         'obd': {
+            'enabled': True,
             'connected': True,
-            'transport': 'usb',
+            'transport': 'bluetooth',
             'signals': {
                 'SPEED': {'value': 72},
                 'RPM': {'value': 2450},
@@ -304,24 +517,86 @@ def test_display(settings: Settings, driver: str | None = None, seconds: float =
             },
             'dtc': {'storedCount': 0},
         },
-        'gps': {'validFix': True, 'satellites': 9, 'headingDegrees': 241, 'latitude': 5.6037, 'longitude': -0.1870},
-        'mqtt': {'connected': True, 'bufferedMessages': 0},
+        'gps': {
+            'enabled': True,
+            'serialOpen': True,
+            'received': True,
+            'validFix': True,
+            'satellites': 9,
+            'headingDegrees': 241,
+            'latitude': 5.6037,
+            'longitude': -0.1870,
+            'speedKph': 71,
+        },
+        'imu': {'enabled': True, 'calibrationState': 'valid', 'resultantG': 0.04},
+        'publisher': {'enabled': True, 'connected': True, 'published': 1200},
+        'frame': {'mode': 'active', 'queueDepth': 0},
         'system': {
             'ipAddress': '192.168.1.42',
             'hostname': socket.gethostname(),
             'wifiSsid': 'RoadNode-WiFi',
             'bluetoothDevice': 'OBDII',
+            'temperatureC': 47.2,
+            'cpuPercent': 18,
+            'uptimeSeconds': 8040,
         },
         'events': {},
     }
+
+
+def preview_scenarios(device_id: str = 'PROTO-001') -> dict[str, tuple[dict, str]]:
+    healthy = sample_snapshot(device_id)
+
+    def variant(**sections):
+        snapshot = sample_snapshot(device_id)
+        for section, values in sections.items():
+            snapshot[section] = {**snapshot.get(section, {}), **values}
+        return snapshot
+
+    return {
+        'healthy': (healthy, 'dashboard'),
+        'qr': (healthy, 'qr'),
+        'obd-down': (
+            variant(obd={'connected': False, 'error': '[Errno 5] Input/output error: /dev/rfcomm0', 'signals': {}}),
+            'dashboard',
+        ),
+        'no-gps-fix': (variant(gps={'validFix': False, 'satellites': 3}), 'dashboard'),
+        'cloud-offline': (
+            variant(publisher={'connected': False, 'error': '[SSL: CERTIFICATE_VERIFY_FAILED]'}, frame={'mode': 'active', 'queueDepth': 42}),
+            'dashboard',
+        ),
+        'imu-calibrating': (
+            variant(imu={'calibrationState': 'running', 'calibrating': True, 'calibrationPercent': 64}),
+            'dashboard',
+        ),
+        'impact-alert': (variant(events={'possibleImpact': True}), 'dashboard'),
+    }
+
+
+def save_previews(out_dir: str, scale: int = 4, device_id: str = 'PROTO-001', web_port: int = 8080) -> list[str]:
+    """Write each scenario as an enlarged PNG so a layout can be reviewed without hardware."""
+    from pathlib import Path
+
+    target = Path(out_dir)
+    target.mkdir(parents=True, exist_ok=True)
+    written = []
+    for name, (snapshot, page) in preview_scenarios(device_id).items():
+        image = render_frame(snapshot, page, web_port=web_port)
+        path = target / f'oled-{name}.png'
+        image.resize((image.width * scale, image.height * scale), Image.NEAREST).save(path)
+        written.append(str(path))
+    return written
+
+
+def test_display(settings: Settings, driver: str | None = None, seconds: float = 3.0) -> None:
+    selected = replace(settings, oled_enabled=True, oled_driver=driver or settings.oled_driver)
+    oled = OLEDDisplay(selected)
     try:
         oled.show(splash_frame(selected.oled_width, selected.oled_height, selected.device_id))
         time.sleep(min(2.0, max(0.2, seconds)))
-        for index, page in enumerate(PAGES):
+        for snapshot, page in preview_scenarios(selected.device_id).values():
             oled.show(
-                render_frame(
-                    sample, page, selected.oled_width, selected.oled_height, index % 2, selected.web_port
-                )
+                render_frame(snapshot, page, selected.oled_width, selected.oled_height, 0, selected.web_port)
             )
             time.sleep(max(0.2, seconds))
     finally:

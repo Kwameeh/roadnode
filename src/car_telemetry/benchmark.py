@@ -171,7 +171,7 @@ class SyntheticWorkload:
         })
         self.state.merge('gps', {'enabled': True, 'received': True, 'validFix': True})
         self.state.merge('imu', {'enabled': True, 'calibrated': True})
-        self.state.merge('mqtt', {'enabled': True, 'connected': True})
+        self.state.merge('publisher', {'enabled': True, 'connected': True})
         self.state.merge('system', {'hostname': 'benchmark-pi', 'ipAddress': '192.168.1.50'})
 
     def allocate_reserve(self):
@@ -257,7 +257,7 @@ class SyntheticWorkload:
         snap = self.state.snapshot()
         raw = json.dumps({'messageType': 'TELEMETRY', 'gps': snap['gps'], 'imu': snap['imu'], 'obd': snap['obd'], 'events': snap['events']}, separators=(',', ':'), default=str).encode()
         framed = b'MQTT' + len(raw).to_bytes(4, 'big') + raw
-        self.state.merge('mqtt', {'lastPublishOk': True, 'lastPayloadBytes': len(framed), 'lastPublishAt': time.time()})
+        self.state.merge('publisher', {'lastPublishOk': True, 'lastPayloadBytes': len(framed), 'lastPublishAt': time.time()})
 
     def status_work(self, _n: int):
         data = json.dumps(self.state.snapshot(), separators=(',', ':'), default=str)

@@ -70,7 +70,9 @@ function renderState(data) {
   latest = data || {};
   const obd = latest.obd || {};
   const gps = latest.gps || {};
-  const mqtt = latest.mqtt || {};
+  // The engine reports the cloud link as `publisher` and the outbox as `frame`.
+  const publisher = latest.publisher || {};
+  const frame = latest.frame || {};
   const system = latest.system || {};
   const oled = latest.oled || {};
   const vehicle = obd.vehicle || {};
@@ -96,7 +98,7 @@ function renderState(data) {
 
   badge('badge-gps', gps.validFix, gps.received);
   badge('badge-obd', obd.connected, obd.connecting);
-  badge('badge-mqtt', mqtt.connected, mqtt.enabled);
+  badge('badge-mqtt', publisher.connected, publisher.enabled);
 
   $('sys-cpu').textContent = system.cpuPercent == null ? '--' : `${system.cpuPercent}%`;
   $('sys-temp').textContent = system.temperatureC == null ? '--' : `${system.temperatureC} °C`;
@@ -106,7 +108,14 @@ function renderState(data) {
   $('sys-ip').textContent = system.ipAddress || '--';
   $('sys-uptime').textContent = fmtUptime(system.uptimeSeconds);
   $('sys-agent').textContent = latest.agent || '--';
-  $('mqtt-buffer').textContent = `${mqtt.bufferedMessages ?? 0} queued / ${mqtt.droppedMessages ?? 0} dropped`;
+  $('cloud-status').textContent = !publisher.enabled
+    ? `Disabled${publisher.error ? ` (${publisher.error})` : ''}`
+    : publisher.connected ? 'Connected' : `Offline${publisher.error ? `: ${publisher.error}` : ', connecting…'}`;
+  $('cloud-broker').textContent = publisher.broker ? `${publisher.broker}${publisher.tls ? ' (TLS)' : ' (NO TLS)'}` : '--';
+  $('cloud-client').textContent = publisher.clientId || '--';
+  $('cloud-username').textContent = publisher.username || '--';
+  $('cloud-topic').textContent = publisher.topic || '--';
+  $('cloud-frames').textContent = `${frame.queueDepth ?? publisher.queueDepth ?? 0} queued · ${publisher.published ?? 0} sent · ${frame.droppedMessages ?? 0} dropped`;
   $('oled-status').textContent = oled.error
     ? `Error: ${oled.error}`
     : `${oled.driver || '--'} / ${oled.page || 'idle'}`;
@@ -332,7 +341,7 @@ function renderBluetooth(data) {
     button.onclick = async () => {
       const { mac, action } = button.dataset;
       try {
-        if (action === 'pair') await postJson('/api/bluetooth/pair', { mac, pin: prompt('Bluetooth PIN (usually 1234 or 0000). Leave blank if none.') || '' });
+        if (action === 'pair') await postJson('/api/bluetooth/pair', { mac, pin: prompt('Bluetooth PIN (ELM327 is usually 1234 or 1111). Leave blank if none.') || '' });
         else if (action === 'use') await postJson('/api/bluetooth/use-elm', { mac });
         else if (action === 'disconnect') await postJson('/api/bluetooth/disconnect', { mac });
         else if (action === 'forget' && confirm(`Forget ${mac}?`)) await postJson('/api/bluetooth/forget', { mac });
@@ -366,6 +375,7 @@ function initActions() {
     button.onclick = async () => { try { await postJson('/api/obd/transport', { transport: button.dataset.transport }); await loadSetup(); toast(`OBD transport set to ${button.dataset.transport}`); } catch (error) { toast(error.message); } };
   });
   $('reconnect-obd').onclick = async () => { try { await postJson('/api/obd/reconnect'); toast('OBD reconnect requested'); } catch (error) { toast(error.message); } };
+  $('show-oled-qr').onclick = async () => { try { const result = await postJson('/api/oled/qr', { seconds: 60 }); toast(`Display shows a QR for ${result.url} for 60 s`); } catch (error) { toast(error.message); } };
   $('scan-bluetooth').onclick = async () => { try { toast('Scanning Bluetooth…'); const result = await postJson('/api/bluetooth/scan'); renderBluetooth({ controller: (await getJson('/api/bluetooth/status')).controller, devices: result.devices }); toast('Bluetooth scan complete'); } catch (error) { toast(error.message); } };
 }
 

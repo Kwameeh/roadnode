@@ -87,7 +87,7 @@ while true; do
       if try_candidate "$token" "$CHANNEL"; then
         break
       fi
-    fi
+    done
   fi
 
   sleep 5

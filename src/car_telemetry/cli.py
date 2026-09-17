@@ -9,6 +9,7 @@ from .bluetooth import bind, discover_channel
 from .common import read_json
 from .config import settings
 from .engine_client import EngineAPI
+from .obd_profiles import PROFILES, print_current, print_profiles, switch_profile
 from .obd_transport import resolve, usb_candidates
 
 
@@ -70,6 +71,15 @@ def main():
     bind_parser.add_argument('--mac', required=True)
     bind_parser.add_argument('--channel', type=int, required=True)
 
+    obd_profile = sub.add_parser(
+        'obd-profile',
+        help='switch the Bluetooth OBD adapter: list, current, or a profile id',
+    )
+    obd_profile.add_argument('target', nargs='?', default='current', choices=['list', 'current', *PROFILES])
+    obd_profile.add_argument('--channel', type=int, help='skip SDP discovery and bind this RFCOMM channel')
+    obd_profile.add_argument('--reboot', action='store_true', help='save the profile and reboot the Pi')
+    obd_profile.add_argument('--verify-seconds', type=float, default=45)
+
     sub.add_parser('obd-reconnect')
 
     transport = sub.add_parser('obd-transport')
@@ -93,6 +103,13 @@ def main():
     oled_test = sub.add_parser('oled-test')
     oled_test.add_argument('--driver', choices=['sh1106', 'ssd1306'])
     oled_test.add_argument('--seconds', type=float, default=3.0)
+
+    oled_qr = sub.add_parser('oled-qr', help='show the web app QR code on the OLED')
+    oled_qr.add_argument('--seconds', type=float, default=60)
+
+    oled_preview = sub.add_parser('oled-preview', help='save enlarged PNGs of the OLED screens')
+    oled_preview.add_argument('--out', default='oled-preview')
+    oled_preview.add_argument('--scale', type=int, default=4)
 
     bench = sub.add_parser('benchmark')
     bench.add_argument('--seconds', type=int, default=120)
@@ -151,6 +168,14 @@ def main():
         bind(args.mac, args.channel)
         return 0
 
+    if args.cmd == 'obd-profile':
+        if args.target == 'list':
+            print_profiles(s)
+            return 0
+        if args.target == 'current':
+            return print_current(s)
+        return switch_profile(s, args.target, args.channel, args.reboot, args.verify_seconds)
+
     if args.cmd == 'obd-reconnect':
         print(api.post('/obd/reconnect'))
         return 0
@@ -189,6 +214,17 @@ def main():
         from .oled import test_display
 
         test_display(s, args.driver, max(0.2, args.seconds))
+        return 0
+
+    if args.cmd == 'oled-qr':
+        print(json.dumps(api.post('/oled/qr', {'seconds': args.seconds}), indent=2))
+        return 0
+
+    if args.cmd == 'oled-preview':
+        from .oled import save_previews
+
+        for path in save_previews(args.out, max(1, args.scale), s.device_id, s.web_port):
+            print(path)
         return 0
 
     if args.cmd == 'benchmark':
