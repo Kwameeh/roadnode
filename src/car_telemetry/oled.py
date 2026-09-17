@@ -14,9 +14,9 @@ from . import oled_font as F
 from .config import Settings
 from .state import DeviceState, queue_depth
 
-# One constant dashboard. The QR screen only replaces it at boot and when
-# asked for (`telemetry oled-qr` or the web app), so nothing rotates.
-PAGES = ('dashboard', 'qr')
+# Pages rotate every OLED_PAGE_SECONDS. The QR screen is not part of the
+# rotation: it shows at boot and when asked for (`telemetry oled-qr`, web app).
+PAGES = ('dashboard', 'obd', 'gps', 'imu', 'system')
 
 STATUS_Y = 0
 ROW_Y = tuple(9 + F.LINE * index for index in range(7))  # 9, 17, ... 57
@@ -121,7 +121,9 @@ def _right(draw: ImageDraw.ImageDraw, text: str, y: int, width: int, fill: int =
     F.draw_text(draw, (width - 1 - F.text_width(text), y), text, fill=fill)
 
 
-def _status_row(draw: ImageDraw.ImageDraw, snapshot: dict, width: int, x: int, blink_on: bool):
+def _status_row(
+    draw: ImageDraw.ImageDraw, snapshot: dict, width: int, x: int, blink_on: bool, page_index: int = 0
+):
     obd = snapshot.get('obd', {})
     gps = snapshot.get('gps', {})
     imu = snapshot.get('imu', {})
@@ -156,9 +158,13 @@ def _status_row(draw: ImageDraw.ImageDraw, snapshot: dict, width: int, x: int, b
         'off' if imu.get('enabled') is False else 'ok' if imu.get('calibrationState') == 'valid' else 'bad',
     )
 
-    temperature = _float(system.get('temperatureC'))
-    if temperature is not None:
-        _right(draw, f'{temperature:.0f}{F.DEGREE}C', STATUS_Y, width)
+    # Page position: a filled square for the current page, a dot for the rest.
+    for index in range(len(PAGES)):
+        left = width - 1 - (len(PAGES) - index) * 5 + 1
+        if index == page_index:
+            draw.rectangle((left, 2, left + 2, 4), fill=255)
+        else:
+            draw.point((left + 1, 3), fill=255)
 
 
 def _speed(snapshot: dict) -> tuple[str, str]:
@@ -211,6 +217,320 @@ def _imu_text(imu: dict) -> str:
     return f'{F.AXES}{F.CROSS}' + (f' {str(state).upper()}' if state else '')
 
 
+def _row(draw: ImageDraw.ImageDraw, index: int, left: str, right: str = '', shift: int = 0, width: int = 128):
+    """One text row: `left` from the left edge, `right` flush right, never overlapping."""
+    usable = width - shift
+    space = usable
+    if right:
+        right = F.fit(right, usable // 2)
+        _right(draw, right, ROW_Y[index], usable)
+        space = usable - F.text_width(right) - 4
+    F.draw_text(draw, (shift, ROW_Y[index]), F.fit(left, space))
+
+
+def _mark(ok: bool) -> str:
+    return F.CHECK if ok else F.CROSS
+
+
+def _signal(signals: dict, name: str, digits: int = 0) -> str:
+    return number(signal_value(signals.get(name)), digits)
+
+
+def _axes(values: Any) -> str:
+    if not isinstance(values, dict):
+        return 'X-- Y-- Z--'
+    parts = []
+    for axis in ('x', 'y', 'z'):
+        value = _float(values.get(axis))
+        if value is None:
+            parts.append(f'{axis}--')
+        else:
+            parts.append(f'{axis}{value:+.1f}' if abs(value) >= 10 else f'{axis}{value:+.2f}')
+    return ' '.join(parts)
+
+
+def _compass(heading: float) -> str:
+    return COMPASS[int((heading % 360) / 45 + 0.5) % 8]
+
+
+def _clock(iso: Any) -> str:
+    match = re.search(r'T(\d\d:\d\d:\d\d)', str(iso or ''))
+    return f'{match.group(1)} UTC' if match else ''
+
+
+def _draw_overview(draw, snapshot: dict, shift: int, width: int, web_port: int, tick: int):
+    usable = width - shift
+    obd = snapshot.get('obd', {})
+    gps = snapshot.get('gps', {})
+    system = snapshot.get('system', {})
+    signals = obd.get('signals', {})
+    frame = snapshot.get('frame', {})
+
+    speed, unit = _speed(snapshot)
+    F.draw_text(draw, (shift + SPEED_WIDTH - F.text_width(speed, 2), ROW_Y[0]), speed, scale=2)
+    F.draw_text(draw, (shift, ROW_Y[2]), unit)
+
+    rpm = _signal(signals, 'RPM')
+    coolant = _signal(signals, 'COOLANT_TEMP')
+    volts = _signal(signals, 'CONTROL_MODULE_VOLTAGE', 1)
+    fuel = _signal(signals, 'FUEL_LEVEL')
+    F.draw_text(draw, (shift + RIGHT_X, ROW_Y[0]), f'{F.RPM}{rpm} {F.THERMO}{coolant}{F.DEGREE}')
+    F.draw_text(draw, (shift + RIGHT_X, ROW_Y[1]), f'{F.BOLT}{volts}V {F.FUEL}{fuel}%')
+
+    dtc = obd.get('dtc', {}).get('storedCount')
+    mode = str(frame.get('mode') or '').upper()
+    F.draw_text(
+        draw,
+        (shift + RIGHT_X, ROW_Y[2]),
+        f"{F.WARN}{dtc if dtc is not None else '-'} {F.UPLOAD}{queue_depth(snapshot)}",
+    )
+    if mode:
+        _right(draw, mode, ROW_Y[2], usable)
+
+    F.draw_text(draw, (shift, ROW_Y[3]), F.fit(_location_line(gps, usable), usable))
+
+    ssid = system.get('wifiSsid') or ('LAN' if system.get('ipAddress') else '--')
+    bt_name = system.get('bluetoothDevice') or str(obd.get('transport') or '--')
+    F.draw_text(draw, (shift, ROW_Y[4]), F.fit(f'{F.WIFI}{ssid}', 62))
+    _right(draw, F.fit(f'{F.BT}{bt_name}', usable - 66), ROW_Y[4], usable)
+
+    F.draw_text(draw, (shift, ROW_Y[5]), F.fit(_imu_text(snapshot.get('imu', {})), 62))
+    cpu = _float(system.get('cpuPercent'))
+    right = ' '.join(
+        part for part in (f'{cpu:.0f}%' if cpu is not None else '', _uptime(system.get('uptimeSeconds'))) if part
+    )
+    if right:
+        _right(draw, right, ROW_Y[5], usable)
+
+    F.draw_text(draw, (shift, ROW_Y[6]), F.fit(bottom_line(snapshot, web_port, tick), usable))
+
+
+def _draw_obd(draw, snapshot: dict, shift: int, width: int, web_port: int, tick: int):
+    obd = snapshot.get('obd', {})
+    signals = obd.get('signals', {})
+    vehicle = obd.get('vehicle', {}) or {}
+    connected = bool(obd.get('connected'))
+    transport = str(obd.get('transport') or '').upper().replace('BLUETOOTH', 'BT')
+    state = 'OFF' if obd.get('enabled') is False else _mark(connected)
+
+    volts = _signal(signals, 'CONTROL_MODULE_VOLTAGE', 1)
+    if volts == '--':
+        # The adapter's own battery reading still works with the ignition off.
+        volts = number(signal_value(vehicle.get('ELM_VOLTAGE')), 1)
+    dtc = obd.get('dtc', {}).get('storedCount')
+
+    _row(draw, 0, f'{F.CAR}OBD-II {state}', transport, shift, width)
+    _row(draw, 1, f"{F.RPM}RPM {_signal(signals, 'RPM')}", f"SPD {_signal(signals, 'SPEED')}", shift, width)
+    _row(draw, 2, f"LOAD {_signal(signals, 'ENGINE_LOAD')}%", f"THR {_signal(signals, 'THROTTLE_POS')}%", shift, width)
+    _row(
+        draw,
+        3,
+        f"{F.THERMO}COOL {_signal(signals, 'COOLANT_TEMP')}{F.DEGREE}",
+        f"INT {_signal(signals, 'INTAKE_TEMP')}{F.DEGREE}",
+        shift,
+        width,
+    )
+    _row(draw, 4, f"{F.FUEL}FUEL {_signal(signals, 'FUEL_LEVEL')}%", f"MAF {_signal(signals, 'MAF', 1)}", shift, width)
+    _row(draw, 5, f'{F.BOLT}{volts}V', f"{F.WARN}DTC {dtc if dtc is not None else '-'}", shift, width)
+
+    if obd.get('enabled') is False:
+        detail = 'OBD_ENABLED=FALSE'
+    elif not connected:
+        reason = f'CONNECTING {transport}'.strip() if obd.get('connecting') else short_error(obd.get('error'), 'WAITING')
+        detail = f'!{reason}'
+    elif vehicle.get('VIN'):
+        detail = f"VIN {vehicle['VIN']}"
+    else:
+        detail = str(obd.get('protocolName') or obd.get('port') or '')
+    _row(draw, 6, detail, '', shift, width)
+
+
+def _draw_gps(draw, snapshot: dict, shift: int, width: int, web_port: int, tick: int):
+    gps = snapshot.get('gps', {})
+    fix = bool(gps.get('validFix'))
+    sats = gps.get('satellites')
+    state = 'OFF' if gps.get('enabled') is False else f"{_mark(fix)} {'FIX' if fix else 'NO FIX'}"
+    heading = _float(gps.get('headingDegrees'))
+    speed = _float(gps.get('speedKph'))
+    # Altitude and HDOP from the last fix are stale once it is lost.
+    altitude = _float(gps.get('altitudeMeters')) if fix else None
+    hdop = _float(gps.get('hdop')) if fix else None
+
+    clock = _clock(gps.get('observedAt')).replace(' UTC', '') if fix else ''
+
+    _row(draw, 0, f'{F.PIN}GPS {state}', f'{sats} SAT' if sats is not None else '', shift, width)
+    _row(draw, 1, f"LAT {number(gps.get('latitude'), 6) if fix else '--'}", clock or 'UTC --', shift, width)
+    _row(
+        draw, 2,
+        f"LON {number(gps.get('longitude'), 6) if fix else '--'}",
+        f"HDOP {f'{hdop:.1f}' if hdop is not None else '--'}",
+        shift, width,
+    )
+    _row(
+        draw, 3,
+        f"SPD {f'{speed:.0f}' if fix and speed is not None else '--'}KM/H",
+        f'{heading:.0f}{F.DEGREE}{_compass(heading)}' if fix and heading is not None else 'HDG --',
+        shift, width,
+    )
+    _row(
+        draw, 4,
+        f"ALT {f'{altitude:.0f}' if altitude is not None else '--'}M",
+        f"NMEA {_mark(bool(gps.get('received')))}",
+        shift, width,
+    )
+    _row(draw, 5, str(gps.get('port') or ''), str(gps.get('baud') or ''), shift, width)
+
+    if gps.get('enabled') is False:
+        detail = 'GPS_ENABLED=FALSE'
+    elif gps.get('serialOpen') is False:
+        detail = '!' + short_error(gps.get('error'), 'PORT CLOSED')
+    elif not gps.get('received'):
+        detail = '!NO NMEA DATA - CHECK TX'
+    elif not fix:
+        detail = 'NEEDS SKY VIEW'
+    elif hdop is None:
+        detail = 'ACCURACY --'
+    else:
+        grade = 'EXCELLENT' if hdop <= 1 else 'GOOD' if hdop <= 2 else 'MODERATE' if hdop <= 5 else 'POOR'
+        detail = f'ACCURACY {grade}'
+    _row(draw, 6, detail, '', shift, width)
+
+
+def _draw_imu(draw, snapshot: dict, shift: int, width: int, web_port: int, tick: int):
+    imu = snapshot.get('imu', {})
+    events = snapshot.get('events', {})
+    calibration = imu.get('calibrationState')
+    healthy = calibration == 'valid' and not imu.get('error')
+    state = 'OFF' if imu.get('enabled') is False else _mark(healthy)
+    address = imu.get('address')
+    try:
+        address_text = f'0X{int(address):02X}'
+    except (TypeError, ValueError):
+        address_text = str(address or '').upper()
+    g = _float(imu.get('resultantG'))
+    temperature = _float(imu.get('temperatureC'))
+
+    _row(draw, 0, f'{F.AXES}IMU {state} MPU6050', address_text, shift, width)
+    _row(draw, 1, 'ACCEL M/S2', f'{g:.2f}G' if g is not None else '--G', shift, width)
+    _row(draw, 2, _axes(imu.get('linearAccelerationMps2')), '', shift, width)
+    _row(draw, 3, 'GYRO RAD/S', f'{temperature:.0f}{F.DEGREE}C' if temperature is not None else '', shift, width)
+    _row(draw, 4, _axes(imu.get('gyroRadPerSec')), '', shift, width)
+
+    orientation = '-'.join(str(imu.get('orientation') or '').split('-')[:2]).upper()
+    if calibration == 'valid':
+        _row(draw, 5, f'CAL {F.CHECK}', orientation, shift, width)
+    elif imu.get('calibrating') or calibration == 'running':
+        _row(draw, 5, f"CAL {number(imu.get('calibrationPercent'))}% KEEP STILL", '', shift, width)
+    else:
+        _row(draw, 5, f"CAL {F.CROSS} {str(calibration or '--').upper()}", orientation, shift, width)
+
+    active = [
+        label
+        for key, label in (
+            ('possibleImpact', 'IMPACT'),
+            ('harshBraking', 'BRAKE'),
+            ('harshAcceleration', 'ACCEL'),
+            ('harshCornering', 'CORNER'),
+        )
+        if events.get(key)
+    ]
+    if imu.get('enabled') is False:
+        detail = 'IMU_ENABLED=FALSE'
+    elif imu.get('error'):
+        detail = '!' + short_error(imu.get('error'), 'SENSOR ERROR')
+    else:
+        detail = f"{F.WARN}{' '.join(active)}" if active else 'EVENTS NONE'
+    _row(draw, 6, detail, '', shift, width)
+
+
+def _draw_system(draw, snapshot: dict, shift: int, width: int, web_port: int, tick: int):
+    publisher = snapshot.get('publisher', {})
+    system = snapshot.get('system', {})
+    frame = snapshot.get('frame', {})
+    connected = bool(publisher.get('connected'))
+    state = 'OFF' if not publisher.get('enabled') else _mark(connected)
+    broker = str(publisher.get('broker') or '')
+    host, _, port = broker.rpartition(':') if ':' in broker else (broker, '', '')
+
+    _row(draw, 0, f'{F.CLOUD}CLOUD {state}', f'{F.UPLOAD}{queue_depth(snapshot)}', shift, width)
+    if F.text_width(host) > width - shift and host.lower().startswith('mqtt.'):
+        host = host[5:]
+    _row(draw, 1, host or '--', '', shift, width)
+    if publisher.get('enabled') and not connected:
+        _row(draw, 2, '!' + short_error(publisher.get('error'), 'CONNECTING'), '', shift, width)
+    else:
+        tls = '' if not broker else ' TLS' if publisher.get('tls') else ' NO TLS'
+        _row(draw, 2, f'{port}{tls}'.strip() or '--', f"SENT {publisher.get('published', 0)}", shift, width)
+
+    ip = system.get('ipAddress')
+    _row(draw, 3, f"{F.WIFI}{system.get('wifiSsid') or ('LAN' if ip else '--')}", system.get('hostname') or '', shift, width)
+    _row(draw, 4, f'{ip}:{web_port}' if ip else '!NO NETWORK', '', shift, width)
+
+    cpu = _float(system.get('cpuPercent'))
+    temperature = _float(system.get('temperatureC'))
+    left = f"CPU {f'{cpu:.0f}' if cpu is not None else '--'}%"
+    if temperature is not None:
+        left += f' {temperature:.0f}{F.DEGREE}C'
+    uptime = _uptime(system.get('uptimeSeconds'))
+    _row(draw, 5, left, f'UP {uptime}' if uptime else '', shift, width)
+
+    _row(draw, 6, _memory_text(system), _storage_text(system), shift, width)
+
+
+def _memory_text(system: dict) -> str:
+    used = _float(system.get('memoryUsedMb'))
+    total = _float(system.get('memoryTotalMb'))
+    if used is not None and total:
+        return f'RAM {used:.0f}/{total:.0f}M'
+    available = _float(system.get('memoryAvailableMb'))
+    return f"RAM {f'{available:.0f}' if available is not None else '--'}M FREE"
+
+
+def _storage_text(system: dict) -> str:
+    free = _float(system.get('diskFreeGb'))
+    total = _float(system.get('diskTotalGb'))
+    if free is not None and total:
+        return f'SD {total - free:.1f}/{total:.0f}G'
+    return f"SD {f'{free:.1f}' if free is not None else '--'}G FREE"
+
+
+_PAGE_BODIES = {
+    'dashboard': _draw_overview,
+    'obd': _draw_obd,
+    'gps': _draw_gps,
+    'imu': _draw_imu,
+    'system': _draw_system,
+}
+
+
+def render_page(
+    snapshot: dict,
+    page: str = 'dashboard',
+    width: int = 128,
+    height: int = 64,
+    shift: int = 0,
+    web_port: int = 8080,
+    tick: int = 0,
+) -> Image.Image:
+    if page not in _PAGE_BODIES:
+        page = 'dashboard'
+    image = Image.new('1', (width, height))
+    draw = ImageDraw.Draw(image)
+    # Every glyph leaves its right-hand column blank, so a 1px shift never clips.
+    shift = max(0, min(1, shift))
+    _status_row(draw, snapshot, width, shift, blink_on=tick % 2 == 0, page_index=PAGES.index(page))
+    _PAGE_BODIES[page](draw, snapshot, shift, width, web_port, tick)
+
+    alert = _alert(snapshot)
+    if alert:
+        # Drawn over rows 0-2 of whichever page is up; the rest stays readable.
+        draw.rectangle((0, ROW_Y[0] - 1, width - 1, ROW_Y[3] - 2), fill=255)
+        title = F.fit(alert[0], width - 4, scale=2)
+        F.draw_text(draw, ((width - F.text_width(title, 2)) // 2, ROW_Y[0]), title, fill=0, scale=2)
+        F.draw_text(draw, ((width - F.text_width(alert[1])) // 2, ROW_Y[2] - 1), alert[1], fill=0)
+    return image
+
+
 def render_dashboard(
     snapshot: dict,
     width: int = 128,
@@ -219,63 +539,7 @@ def render_dashboard(
     web_port: int = 8080,
     tick: int = 0,
 ) -> Image.Image:
-    image = Image.new('1', (width, height))
-    draw = ImageDraw.Draw(image)
-    # Every glyph leaves its right-hand column blank, so a 1px shift never clips.
-    shift = max(0, min(1, shift))
-    usable = width - shift
-    obd = snapshot.get('obd', {})
-    gps = snapshot.get('gps', {})
-    system = snapshot.get('system', {})
-    signals = obd.get('signals', {})
-    frame = snapshot.get('frame', {})
-
-    _status_row(draw, snapshot, width, shift, blink_on=tick % 2 == 0)
-
-    alert = _alert(snapshot)
-    if alert:
-        draw.rectangle((0, ROW_Y[0] - 1, width - 1, ROW_Y[3] - 2), fill=255)
-        title = F.fit(alert[0], width - 4, scale=2)
-        F.draw_text(draw, ((width - F.text_width(title, 2)) // 2, ROW_Y[0]), title, fill=0, scale=2)
-        F.draw_text(draw, ((width - F.text_width(alert[1])) // 2, ROW_Y[2] - 1), alert[1], fill=0)
-    else:
-        speed, unit = _speed(snapshot)
-        F.draw_text(draw, (shift + SPEED_WIDTH - F.text_width(speed, 2), ROW_Y[0]), speed, scale=2)
-        F.draw_text(draw, (shift, ROW_Y[2]), unit)
-
-        rpm = number(signal_value(signals.get('RPM')))
-        coolant = number(signal_value(signals.get('COOLANT_TEMP')))
-        volts = number(signal_value(signals.get('CONTROL_MODULE_VOLTAGE')), 1)
-        fuel = number(signal_value(signals.get('FUEL_LEVEL')))
-        F.draw_text(draw, (shift + RIGHT_X, ROW_Y[0]), f'{F.RPM}{rpm} {F.THERMO}{coolant}{F.DEGREE}')
-        F.draw_text(draw, (shift + RIGHT_X, ROW_Y[1]), f'{F.BOLT}{volts}V {F.FUEL}{fuel}%')
-
-        dtc = obd.get('dtc', {}).get('storedCount')
-        mode = str(frame.get('mode') or '').upper()
-        F.draw_text(
-            draw,
-            (shift + RIGHT_X, ROW_Y[2]),
-            f"{F.WARN}{dtc if dtc is not None else '-'} {F.UPLOAD}{queue_depth(snapshot)}",
-        )
-        if mode:
-            _right(draw, mode, ROW_Y[2], usable)
-
-    F.draw_text(draw, (shift, ROW_Y[3]), F.fit(_location_line(gps, usable), usable))
-
-    ssid = system.get('wifiSsid') or ('LAN' if system.get('ipAddress') else '--')
-    F.draw_text(draw, (shift, ROW_Y[4]), F.fit(f'{F.WIFI}{ssid}', 62))
-    bt_name = system.get('bluetoothDevice') or str(obd.get('transport') or '--')
-    bt_text = F.fit(f'{F.BT}{bt_name}', usable - 66)
-    _right(draw, bt_text, ROW_Y[4], usable)
-
-    F.draw_text(draw, (shift, ROW_Y[5]), F.fit(_imu_text(snapshot.get('imu', {})), 62))
-    cpu = _float(system.get('cpuPercent'))
-    right = ' '.join(part for part in (f'{cpu:.0f}%' if cpu is not None else '', _uptime(system.get('uptimeSeconds'))) if part)
-    if right:
-        _right(draw, right, ROW_Y[5], usable)
-
-    F.draw_text(draw, (shift, ROW_Y[6]), F.fit(bottom_line(snapshot, web_port, tick), usable))
-    return image
+    return render_page(snapshot, 'dashboard', width, height, shift, web_port, tick)
 
 
 def web_address(snapshot: dict, web_port: int) -> str | None:
@@ -366,11 +630,12 @@ def render_frame(
     web_port: int = 8080,
     tick: int = 0,
 ) -> Image.Image:
-    if page == 'qr' and not _alert(snapshot):
-        image = render_qr(snapshot, width, height, web_port)
+    if page == 'qr':
+        image = None if _alert(snapshot) else render_qr(snapshot, width, height, web_port)
         if image is not None:
             return image
-    return render_dashboard(snapshot, width, height, shift, web_port, tick)
+        page = 'dashboard'
+    return render_page(snapshot, page, width, height, shift, web_port, tick)
 
 
 def splash_frame(width: int, height: int, device_id: str) -> Image.Image:
@@ -386,12 +651,15 @@ def splash_frame(width: int, height: int, device_id: str) -> Image.Image:
     return image
 
 
-def current_page(snapshot: dict, elapsed: float, boot_qr_seconds: float, now: float) -> str:
-    """QR while the boot window is open or a request is active, else the dashboard."""
+def current_page(
+    snapshot: dict, elapsed: float, boot_qr_seconds: float, now: float, page_seconds: float = 5.0
+) -> str:
+    """QR while the boot window is open or a request is active, else the rotating pages."""
     requested_until = _float(snapshot.get('oled', {}).get('qrUntil'))
     if elapsed < boot_qr_seconds or (requested_until is not None and now < requested_until):
         return 'qr'
-    return 'dashboard'
+    carousel = max(0.0, elapsed - boot_qr_seconds)
+    return PAGES[int(carousel / max(1.0, page_seconds)) % len(PAGES)]
 
 
 class OLEDDisplay:
@@ -455,7 +723,9 @@ def worker(settings: Settings, state: DeviceState, stop: threading.Event):
 
                 elapsed = max(0.0, time.monotonic() - started)
                 snapshot = state.snapshot()
-                page = current_page(snapshot, elapsed, settings.oled_access_seconds, time.time())
+                page = current_page(
+                    snapshot, elapsed, settings.oled_access_seconds, time.time(), settings.oled_page_seconds
+                )
                 frame = render_frame(
                     snapshot,
                     page,
@@ -467,7 +737,7 @@ def worker(settings: Settings, state: DeviceState, stop: threading.Event):
                 )
                 oled.show(frame)
                 shown = 'alert' if _alert(snapshot) else page
-                if page == 'qr' and web_url(snapshot, settings.web_port) is None:
+                if shown == 'qr' and web_url(snapshot, settings.web_port) is None:
                     shown = 'dashboard'
                 state.merge(
                     'oled',
@@ -508,29 +778,56 @@ def sample_snapshot(device_id: str = 'PROTO-001', web_port: int = 8080) -> dict:
             'enabled': True,
             'connected': True,
             'transport': 'bluetooth',
+            'port': '/dev/rfcomm0',
+            'protocolName': 'ISO 15765-4 (CAN 11/500)',
             'signals': {
                 'SPEED': {'value': 72},
                 'RPM': {'value': 2450},
                 'COOLANT_TEMP': {'value': 91},
+                'INTAKE_TEMP': {'value': 32},
+                'ENGINE_LOAD': {'value': 34},
+                'THROTTLE_POS': {'value': 18},
+                'MAF': {'value': 5.2},
                 'CONTROL_MODULE_VOLTAGE': {'value': 13.9},
                 'FUEL_LEVEL': {'value': 64},
             },
+            'vehicle': {'VIN': '1HGCM82633A004352', 'ELM_VOLTAGE': {'value': 13.8, 'unit': 'volt'}},
             'dtc': {'storedCount': 0},
         },
         'gps': {
             'enabled': True,
+            'port': '/dev/serial0',
+            'baud': 9600,
             'serialOpen': True,
             'received': True,
             'validFix': True,
             'satellites': 9,
+            'hdop': 0.9,
             'headingDegrees': 241,
-            'latitude': 5.6037,
-            'longitude': -0.1870,
+            'latitude': 5.603712,
+            'longitude': -0.187012,
+            'altitudeMeters': 34,
             'speedKph': 71,
+            'observedAt': '2026-09-17T14:32:05Z',
         },
-        'imu': {'enabled': True, 'calibrationState': 'valid', 'resultantG': 0.04},
-        'publisher': {'enabled': True, 'connected': True, 'published': 1200},
-        'frame': {'mode': 'active', 'queueDepth': 0},
+        'imu': {
+            'enabled': True,
+            'address': 0x68,
+            'orientation': 'x-forward-y-left-z-up',
+            'calibrationState': 'valid',
+            'resultantG': 0.04,
+            'temperatureC': 36.4,
+            'linearAccelerationMps2': {'x': 0.12, 'y': -0.03, 'z': 0.01},
+            'gyroRadPerSec': {'x': 0.0, 'y': -0.01, 'z': 0.0},
+        },
+        'publisher': {
+            'enabled': True,
+            'connected': True,
+            'published': 1200,
+            'broker': 'mqtt.obd2.ragnogroup.com:8883',
+            'tls': True,
+        },
+        'frame': {'mode': 'active', 'queueDepth': 0, 'droppedMessages': 0},
         'system': {
             'ipAddress': '192.168.1.42',
             'hostname': socket.gethostname(),
@@ -539,6 +836,11 @@ def sample_snapshot(device_id: str = 'PROTO-001', web_port: int = 8080) -> dict:
             'temperatureC': 47.2,
             'cpuPercent': 18,
             'uptimeSeconds': 8040,
+            'memoryAvailableMb': 212,
+            'memoryUsedMb': 204,
+            'memoryTotalMb': 416,
+            'diskFreeGb': 9.8,
+            'diskTotalGb': 14.6,
         },
         'events': {},
     }
@@ -553,24 +855,33 @@ def preview_scenarios(device_id: str = 'PROTO-001') -> dict[str, tuple[dict, str
             snapshot[section] = {**snapshot.get(section, {}), **values}
         return snapshot
 
-    return {
-        'healthy': (healthy, 'dashboard'),
-        'qr': (healthy, 'qr'),
-        'obd-down': (
-            variant(obd={'connected': False, 'error': '[Errno 5] Input/output error: /dev/rfcomm0', 'signals': {}}),
-            'dashboard',
-        ),
-        'no-gps-fix': (variant(gps={'validFix': False, 'satellites': 3}), 'dashboard'),
-        'cloud-offline': (
-            variant(publisher={'connected': False, 'error': '[SSL: CERTIFICATE_VERIFY_FAILED]'}, frame={'mode': 'active', 'queueDepth': 42}),
-            'dashboard',
-        ),
-        'imu-calibrating': (
-            variant(imu={'calibrationState': 'running', 'calibrating': True, 'calibrationPercent': 64}),
-            'dashboard',
-        ),
-        'impact-alert': (variant(events={'possibleImpact': True}), 'dashboard'),
-    }
+    obd_down = variant(obd={'connected': False, 'error': '[Errno 5] Input/output error: /dev/rfcomm0', 'signals': {}})
+    no_fix = variant(gps={'validFix': False, 'satellites': 3})
+    cloud_down = variant(
+        publisher={'connected': False, 'error': '[SSL: CERTIFICATE_VERIFY_FAILED]'},
+        frame={'mode': 'active', 'queueDepth': 42},
+    )
+    calibrating = variant(imu={'calibrationState': 'running', 'calibrating': True, 'calibrationPercent': 64})
+    braking = variant(
+        imu={'linearAccelerationMps2': {'x': -4.1, 'y': 0.4, 'z': 0.2}, 'resultantG': 0.42},
+        events={'harshBraking': True},
+    )
+
+    scenarios: dict[str, tuple[dict, str]] = {'qr': (healthy, 'qr')}
+    for page in PAGES:
+        scenarios[f'{page}'] = (healthy, page)
+    scenarios.update(
+        {
+            'dashboard-obd-down': (obd_down, 'dashboard'),
+            'obd-down': (obd_down, 'obd'),
+            'gps-no-fix': (no_fix, 'gps'),
+            'imu-calibrating': (calibrating, 'imu'),
+            'imu-harsh-braking': (braking, 'imu'),
+            'system-cloud-offline': (cloud_down, 'system'),
+            'impact-alert': (variant(events={'possibleImpact': True}), 'dashboard'),
+        }
+    )
+    return scenarios
 
 
 def save_previews(out_dir: str, scale: int = 4, device_id: str = 'PROTO-001', web_port: int = 8080) -> list[str]:

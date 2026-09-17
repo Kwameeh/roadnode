@@ -6,6 +6,7 @@ from car_telemetry import oled
 from car_telemetry import oled_font as F
 from car_telemetry.config import settings
 from car_telemetry.oled import (
+    PAGES,
     OLEDDisplay,
     bottom_line,
     current_page,
@@ -126,12 +127,79 @@ def test_queue_depth_reads_the_outbox_sections_not_the_old_mqtt_section():
     assert queue_depth({'mqtt': {'bufferedMessages': 9}}) == 0
 
 
-def test_qr_page_at_boot_and_on_request():
-    assert current_page({}, elapsed=5, boot_qr_seconds=20, now=1000) == 'qr'
-    assert current_page({}, elapsed=25, boot_qr_seconds=20, now=1000) == 'dashboard'
+def test_qr_at_boot_then_pages_rotate_and_qr_on_request():
+    assert current_page({}, elapsed=5, boot_qr_seconds=20, now=1000, page_seconds=5) == 'qr'
+    rotation = [current_page({}, elapsed=20 + 5 * index, boot_qr_seconds=20, now=1000, page_seconds=5) for index in range(6)]
+    assert rotation == ['dashboard', 'obd', 'gps', 'imu', 'system', 'dashboard']
     requested = {'oled': {'qrUntil': 1060}}
-    assert current_page(requested, elapsed=500, boot_qr_seconds=20, now=1000) == 'qr'
-    assert current_page(requested, elapsed=500, boot_qr_seconds=20, now=1061) == 'dashboard'
+    assert current_page(requested, elapsed=500, boot_qr_seconds=20, now=1000, page_seconds=5) == 'qr'
+    assert current_page(requested, elapsed=500, boot_qr_seconds=20, now=1061, page_seconds=5) != 'qr'
+
+
+def test_each_sensor_page_is_distinct_and_marks_its_position():
+    snapshot = sample_snapshot()
+    frames = {page: render_frame(snapshot, page) for page in PAGES}
+    assert len({frame.tobytes() for frame in frames.values()}) == len(PAGES)
+    icons = {frame.crop((0, 0, 100, 8)).tobytes() for frame in frames.values()}
+    dots = {frame.crop((100, 0, 128, 8)).tobytes() for frame in frames.values()}
+    # Same status icons on every page; only the page-position marker moves.
+    assert len(icons) == 1
+    assert len(dots) == len(PAGES)
+
+
+@pytest.mark.parametrize('page', PAGES)
+def test_every_page_fits_with_long_values_and_missing_data(page):
+    snapshot = sample_snapshot()
+    snapshot['system']['wifiSsid'] = 'An Extremely Long Wireless Network Name'
+    snapshot['obd']['error'] = 'x' * 200
+    snapshot['gps'].update(latitude=-33.868820, longitude=-151.209296)
+    snapshot['imu']['linearAccelerationMps2'] = {'x': -19.5, 'y': 12.25, 'z': -10.0}
+    for shift in (0, 1):
+        assert render_frame(snapshot, page, shift=shift).getbbox()[2] <= 128
+    empty = {'obd': {}, 'gps': {}, 'imu': {}, 'publisher': {}, 'system': {}, 'events': {}}
+    assert render_frame(empty, page).getbbox() is not None
+
+
+def test_default_rotation_gives_each_page_twenty_seconds(monkeypatch, tmp_path):
+    monkeypatch.delenv('OLED_PAGE_SECONDS', raising=False)
+    monkeypatch.setenv('TELEMETRY_ENV', str(tmp_path / 'missing.env'))
+    monkeypatch.chdir(tmp_path)
+    page_seconds = settings().oled_page_seconds
+    assert page_seconds == 20
+    assert current_page({}, 19.9, 0, 0, page_seconds) == 'dashboard'
+    assert current_page({}, 20.0, 0, 0, page_seconds) == 'obd'
+
+
+def test_system_page_shows_memory_and_storage_usage():
+    snapshot = sample_snapshot()
+    base = render_frame(snapshot, 'system')
+    snapshot['system']['diskFreeGb'] = 1.2
+    assert render_frame(snapshot, 'system').tobytes() != base.tobytes()
+    snapshot['system']['memoryUsedMb'] = 400
+    assert oled._memory_text(snapshot['system']) == 'RAM 400/416M'
+    assert oled._storage_text(snapshot['system']) == 'SD 13.4/15G'
+    assert oled._storage_text({}) == 'SD --G FREE'
+
+
+def test_gps_page_hides_stale_position_after_losing_fix():
+    fixed = sample_snapshot()
+    lost = sample_snapshot()
+    lost['gps']['validFix'] = False
+    assert render_frame(fixed, 'gps').tobytes() != render_frame(lost, 'gps').tobytes()
+    moved = sample_snapshot()
+    moved['gps'].update(validFix=False, latitude=40.0, longitude=10.0, altitudeMeters=999, hdop=9.9)
+    assert render_frame(lost, 'gps').tobytes() == render_frame(moved, 'gps').tobytes()
+
+
+def test_obd_page_shows_adapter_voltage_when_ecu_voltage_is_missing():
+    with_ecu = sample_snapshot()
+    adapter_only = sample_snapshot()
+    del adapter_only['obd']['signals']['CONTROL_MODULE_VOLTAGE']
+    assert render_frame(adapter_only, 'obd').tobytes() != render_frame(with_ecu, 'obd').tobytes()
+    no_voltage = sample_snapshot()
+    del no_voltage['obd']['signals']['CONTROL_MODULE_VOLTAGE']
+    del no_voltage['obd']['vehicle']['ELM_VOLTAGE']
+    assert render_frame(no_voltage, 'obd').tobytes() != render_frame(adapter_only, 'obd').tobytes()
 
 
 def test_font_measures_and_fits_text():
