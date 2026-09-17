@@ -78,6 +78,16 @@ def short_error(message: Any, fallback: str) -> str:
     return re.sub(r'\s+', ' ', text).upper()
 
 
+def cloud_error(message: Any, fallback: str) -> str:
+    """Publisher errors: a missing file there is the MQTT CA certificate, not RFCOMM."""
+    text = str(message or '').lower()
+    if 'no such file' in text:
+        return 'CA CERT MISSING'
+    if 'not established' in text:
+        return 'NO CONNACK'
+    return short_error(message, fallback)
+
+
 def problems(snapshot: dict) -> list[str]:
     """Most important first. Each entry is one bottom-line message."""
     obd = snapshot.get('obd', {})
@@ -95,7 +105,7 @@ def problems(snapshot: dict) -> list[str]:
         else:
             found.append('OBD ' + short_error(obd.get('error'), 'WAITING'))
     if publisher.get('enabled') and not publisher.get('connected'):
-        found.append('CLOUD ' + short_error(publisher.get('error'), 'CONNECTING'))
+        found.append('CLOUD ' + cloud_error(publisher.get('error'), 'CONNECTING'))
     if gps.get('enabled') and gps.get('serialOpen') is False:
         found.append('GPS ' + short_error(gps.get('error'), 'PORT CLOSED'))
     elif gps.get('enabled') and gps.get('serialOpen') and not gps.get('received'):
@@ -359,7 +369,7 @@ def _draw_overview_health(draw, snapshot: dict, shift: int, width: int, web_port
     line(
         3, F.CLOUD, 'CLOUD', bool(publisher.get('enabled')), bool(publisher.get('connected')),
         f"Q{queue_depth(snapshot)} SENT {publisher.get('published', 0)}",
-        short_error(publisher.get('error'), 'CONNECTING'),
+        cloud_error(publisher.get('error'), 'CONNECTING'),
     )
     ip = system.get('ipAddress')
     line(4, F.WIFI, 'WIFI', True, bool(ip), system.get('wifiSsid') or 'LAN', 'NO NETWORK')
@@ -531,9 +541,9 @@ def _draw_cloud(draw, snapshot: dict, shift: int, width: int, web_port: int, tic
     tls = '' if not broker else ' TLS' if publisher.get('tls') else ' NO TLS'
     _row(draw, 2, f'{port}{tls}'.strip() or '--', f"SENT {publisher.get('published', 0)}", shift, width)
     if not publisher.get('enabled'):
-        _row(draw, 3, short_error(publisher.get('error'), 'MQTT DISABLED'), '', shift, width)
+        _row(draw, 3, cloud_error(publisher.get('error'), 'MQTT DISABLED'), '', shift, width)
     elif not connected:
-        _row(draw, 3, '!' + short_error(publisher.get('error'), 'CONNECTING'), '', shift, width)
+        _row(draw, 3, '!' + cloud_error(publisher.get('error'), 'CONNECTING'), '', shift, width)
     else:
         _row(draw, 3, f"REPLAY {publisher.get('replayed', 0)}", f"REJECT {publisher.get('rejected', 0)}", shift, width)
 
