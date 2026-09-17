@@ -14,9 +14,10 @@ from . import oled_font as F
 from .config import Settings
 from .state import DeviceState, queue_depth
 
-# Pages rotate every OLED_PAGE_SECONDS. The QR screen is not part of the
-# rotation: it shows at boot and when asked for (`telemetry oled-qr`, web app).
-PAGES = ('dashboard', 'obd', 'gps', 'imu', 'system')
+# The dashboard shows for OLED_DASHBOARD_SECONDS, every other page for
+# OLED_PAGE_SECONDS. The QR page is skipped while there is no network address;
+# it is also shown at boot and on request (`telemetry oled-qr`, web app).
+PAGES = ('dashboard', 'overview', 'obd', 'gps', 'imu', 'cloud', 'pi', 'qr')
 
 STATUS_Y = 0
 ROW_Y = tuple(9 + F.LINE * index for index in range(7))  # 9, 17, ... 57
@@ -57,7 +58,7 @@ _ERROR_PATTERNS = (
     (r'network is unreachable|no route to host', 'NO ROUTE'),
     (r'connection refused', 'REFUSED'),
     (r'timed out|timeout', 'TIMEOUT'),
-    (r'car_connected', 'NO ECU - IGNITION ON?'),
+    (r'car_connected', 'NO ECU/IGN OFF'),
     (r'input/output error', 'BT I/O ERROR'),
     (r'rfcomm|no such file', 'NO RFCOMM0 LINK'),
     (r'no obd port|no usb|not found', 'ADAPTER NOT FOUND'),
@@ -122,7 +123,12 @@ def _right(draw: ImageDraw.ImageDraw, text: str, y: int, width: int, fill: int =
 
 
 def _status_row(
-    draw: ImageDraw.ImageDraw, snapshot: dict, width: int, x: int, blink_on: bool, page_index: int = 0
+    draw: ImageDraw.ImageDraw,
+    snapshot: dict,
+    width: int,
+    x: int,
+    blink_on: bool,
+    page_index: int | None = None,
 ):
     obd = snapshot.get('obd', {})
     gps = snapshot.get('gps', {})
@@ -157,6 +163,12 @@ def _status_row(
         F.AXES,
         'off' if imu.get('enabled') is False else 'ok' if imu.get('calibrationState') == 'valid' else 'bad',
     )
+
+    if page_index is None:
+        temperature = _float(system.get('temperatureC'))
+        if temperature is not None:
+            _right(draw, f'{temperature:.0f}{F.DEGREE}C', STATUS_Y, width)
+        return
 
     # Page position: a filled square for the current page, a dot for the rest.
     for index in range(len(PAGES)):
@@ -222,7 +234,8 @@ def _row(draw: ImageDraw.ImageDraw, index: int, left: str, right: str = '', shif
     usable = width - shift
     space = usable
     if right:
-        right = F.fit(right, usable // 2)
+        # A short label gives the rest of the row to the value on the right.
+        right = F.fit(right, max(usable // 2, usable - F.text_width(left) - 5))
         _right(draw, right, ROW_Y[index], usable)
         space = usable - F.text_width(right) - 4
     F.draw_text(draw, (shift, ROW_Y[index]), F.fit(left, space))
@@ -303,6 +316,68 @@ def _draw_overview(draw, snapshot: dict, shift: int, width: int, web_port: int, 
         _right(draw, right, ROW_Y[5], usable)
 
     F.draw_text(draw, (shift, ROW_Y[6]), F.fit(bottom_line(snapshot, web_port, tick), usable))
+
+
+def _hdop_grade(hdop: float | None) -> str:
+    if hdop is None:
+        return ''
+    return 'EXCELLENT' if hdop <= 1 else 'GOOD' if hdop <= 2 else 'MODERATE' if hdop <= 5 else 'POOR'
+
+
+def _draw_overview_health(draw, snapshot: dict, shift: int, width: int, web_port: int, tick: int):
+    """One line per subsystem: is it working, and the one detail that matters."""
+    obd = snapshot.get('obd', {})
+    gps = snapshot.get('gps', {})
+    imu = snapshot.get('imu', {})
+    publisher = snapshot.get('publisher', {})
+    system = snapshot.get('system', {})
+    signals = obd.get('signals', {})
+
+    def line(index: int, icon: str, name: str, enabled: bool, ok: bool, detail: str, problem: str):
+        mark = '-' if not enabled else _mark(ok)
+        _row(draw, index, f'{icon}{name} {mark}', detail if ok or not enabled else problem, shift, width)
+
+    transport = str(obd.get('transport') or '').upper().replace('BLUETOOTH', 'BT')
+    line(
+        0, F.CAR, 'OBD', obd.get('enabled') is not False, bool(obd.get('connected')),
+        f"{transport} {_signal(signals, 'RPM')}RPM".strip(),
+        short_error(obd.get('error'), 'CONNECTING' if obd.get('connecting') else 'WAITING'),
+    )
+    sats = gps.get('satellites')
+    line(
+        1, F.PIN, 'GPS', gps.get('enabled') is not False, bool(gps.get('validFix')),
+        f"{sats if sats is not None else '--'} SAT HDOP {number(gps.get('hdop'), 1)}",
+        'PORT CLOSED' if gps.get('serialOpen') is False else 'NO DATA' if not gps.get('received') else f"NO FIX {sats or 0} SAT",
+    )
+    g = _float(imu.get('resultantG'))
+    line(
+        2, F.AXES, 'IMU', imu.get('enabled') is not False, imu.get('calibrationState') == 'valid' and not imu.get('error'),
+        f'{g:.2f}G' if g is not None else 'CALIBRATED',
+        f"CAL {number(imu.get('calibrationPercent'))}%" if imu.get('calibrating') or imu.get('calibrationState') == 'running'
+        else short_error(imu.get('error'), str(imu.get('calibrationState') or 'WAITING').upper()),
+    )
+    line(
+        3, F.CLOUD, 'CLOUD', bool(publisher.get('enabled')), bool(publisher.get('connected')),
+        f"Q{queue_depth(snapshot)} SENT {publisher.get('published', 0)}",
+        short_error(publisher.get('error'), 'CONNECTING'),
+    )
+    ip = system.get('ipAddress')
+    line(4, F.WIFI, 'WIFI', True, bool(ip), system.get('wifiSsid') or 'LAN', 'NO NETWORK')
+    line(
+        5, F.BT, 'BT', transport == 'BT', bool(system.get('bluetoothDevice')) or bool(obd.get('connected')),
+        system.get('bluetoothDevice') or 'RFCOMM0', 'NOT CONNECTED',
+    )
+    cpu = _float(system.get('cpuPercent'))
+    temperature = _float(system.get('temperatureC'))
+    power = power_status(system.get('throttled'))
+    pi_ok = not power.startswith('!') and (temperature is None or temperature < 80)
+    pi_detail = ' '.join(
+        part for part in (
+            f'{cpu:.0f}%' if cpu is not None else '',
+            f'{temperature:.0f}{F.DEGREE}C' if temperature is not None else '',
+        ) if part
+    )
+    line(6, F.THERMO, 'PI', True, pi_ok, pi_detail or '--', power if power.startswith('!') else f'HOT {pi_detail}')
 
 
 def _draw_obd(draw, snapshot: dict, shift: int, width: int, web_port: int, tick: int):
@@ -388,11 +463,8 @@ def _draw_gps(draw, snapshot: dict, shift: int, width: int, web_port: int, tick:
         detail = '!NO NMEA DATA - CHECK TX'
     elif not fix:
         detail = 'NEEDS SKY VIEW'
-    elif hdop is None:
-        detail = 'ACCURACY --'
     else:
-        grade = 'EXCELLENT' if hdop <= 1 else 'GOOD' if hdop <= 2 else 'MODERATE' if hdop <= 5 else 'POOR'
-        detail = f'ACCURACY {grade}'
+        detail = f"ACCURACY {_hdop_grade(hdop) or '--'}"
     _row(draw, 6, detail, '', shift, width)
 
 
@@ -443,7 +515,7 @@ def _draw_imu(draw, snapshot: dict, shift: int, width: int, web_port: int, tick:
     _row(draw, 6, detail, '', shift, width)
 
 
-def _draw_system(draw, snapshot: dict, shift: int, width: int, web_port: int, tick: int):
+def _draw_cloud(draw, snapshot: dict, shift: int, width: int, web_port: int, tick: int):
     publisher = snapshot.get('publisher', {})
     system = snapshot.get('system', {})
     frame = snapshot.get('frame', {})
@@ -451,30 +523,30 @@ def _draw_system(draw, snapshot: dict, shift: int, width: int, web_port: int, ti
     state = 'OFF' if not publisher.get('enabled') else _mark(connected)
     broker = str(publisher.get('broker') or '')
     host, _, port = broker.rpartition(':') if ':' in broker else (broker, '', '')
-
-    _row(draw, 0, f'{F.CLOUD}CLOUD {state}', f'{F.UPLOAD}{queue_depth(snapshot)}', shift, width)
     if F.text_width(host) > width - shift and host.lower().startswith('mqtt.'):
         host = host[5:]
+
+    _row(draw, 0, f'{F.CLOUD}CLOUD {state}', f'{F.UPLOAD}{queue_depth(snapshot)}', shift, width)
     _row(draw, 1, host or '--', '', shift, width)
-    if publisher.get('enabled') and not connected:
-        _row(draw, 2, '!' + short_error(publisher.get('error'), 'CONNECTING'), '', shift, width)
+    tls = '' if not broker else ' TLS' if publisher.get('tls') else ' NO TLS'
+    _row(draw, 2, f'{port}{tls}'.strip() or '--', f"SENT {publisher.get('published', 0)}", shift, width)
+    if not publisher.get('enabled'):
+        _row(draw, 3, short_error(publisher.get('error'), 'MQTT DISABLED'), '', shift, width)
+    elif not connected:
+        _row(draw, 3, '!' + short_error(publisher.get('error'), 'CONNECTING'), '', shift, width)
     else:
-        tls = '' if not broker else ' TLS' if publisher.get('tls') else ' NO TLS'
-        _row(draw, 2, f'{port}{tls}'.strip() or '--', f"SENT {publisher.get('published', 0)}", shift, width)
+        _row(draw, 3, f"REPLAY {publisher.get('replayed', 0)}", f"REJECT {publisher.get('rejected', 0)}", shift, width)
 
     ip = system.get('ipAddress')
-    _row(draw, 3, f"{F.WIFI}{system.get('wifiSsid') or ('LAN' if ip else '--')}", system.get('hostname') or '', shift, width)
-    _row(draw, 4, f'{ip}:{web_port}' if ip else '!NO NETWORK', '', shift, width)
-
-    cpu = _float(system.get('cpuPercent'))
-    temperature = _float(system.get('temperatureC'))
-    left = f"CPU {f'{cpu:.0f}' if cpu is not None else '--'}%"
-    if temperature is not None:
-        left += f' {temperature:.0f}{F.DEGREE}C'
-    uptime = _uptime(system.get('uptimeSeconds'))
-    _row(draw, 5, left, f'UP {uptime}' if uptime else '', shift, width)
-
-    _row(draw, 6, _memory_text(system), _storage_text(system), shift, width)
+    _row(draw, 4, f"{F.WIFI}{system.get('wifiSsid') or ('LAN' if ip else '--')}", system.get('hostname') or '', shift, width)
+    _row(draw, 5, f'{ip}:{web_port}' if ip else '!NO NETWORK', '', shift, width)
+    queue_bytes = _float(frame.get('queueBytes', publisher.get('queueBytes')))
+    _row(
+        draw, 6,
+        f"DROPPED {frame.get('droppedMessages') or 0}",
+        f"OUTBOX {queue_bytes / 1048576:.1f}M" if queue_bytes is not None else 'OUTBOX --',
+        shift, width,
+    )
 
 
 def _memory_text(system: dict) -> str:
@@ -494,12 +566,88 @@ def _storage_text(system: dict) -> str:
     return f"SD {f'{free:.1f}' if free is not None else '--'}G FREE"
 
 
+def _percent(used: float | None, total: float | None) -> float | None:
+    if used is None or not total:
+        return None
+    return max(0.0, min(100.0, used * 100.0 / total))
+
+
+def power_status(throttled: Any) -> str:
+    """Summarise `vcgencmd get_throttled`; problems happening now come first."""
+    try:
+        flags = int(throttled)
+    except (TypeError, ValueError):
+        return 'PWR --'
+    if flags & 0x1:
+        return '!LOW VOLTS'
+    if flags & 0x4:
+        return '!THROTTLED'
+    if flags & 0x8:
+        return '!HOT LIMIT'
+    if flags & 0x2:
+        return '!CPU CAPPED'
+    if flags & 0x10000:
+        return 'LOW V SEEN'
+    if flags & 0xE0000:
+        return 'THROTL SEEN'
+    return f'PWR {F.CHECK}'
+
+
+def _bar_row(draw, index: int, label: str, value: float | None, shift: int, width: int):
+    """Label on the left, a bar filling the right half in proportion to `value` (0-100)."""
+    usable = width - shift
+    left = usable // 2 + 2
+    right = usable - 2
+    F.draw_text(draw, (shift, ROW_Y[index]), F.fit(label, left - shift - 3))
+    top, bottom = ROW_Y[index], ROW_Y[index] + F.HEIGHT - 1
+    draw.rectangle((left, top, right, bottom), outline=255)
+    if value is not None:
+        fill = left + 1 + int((right - left - 2) * value / 100.0 + 0.5)
+        if fill > left + 1:
+            draw.rectangle((left + 1, top + 1, fill, bottom - 1), fill=255)
+
+
+def _draw_pi(draw, snapshot: dict, shift: int, width: int, web_port: int, tick: int):
+    system = snapshot.get('system', {})
+    cpu = _float(system.get('cpuPercent'))
+    temperature = _float(system.get('temperatureC'))
+    memory = _percent(_float(system.get('memoryUsedMb')), _float(system.get('memoryTotalMb')))
+    disk_total = _float(system.get('diskTotalGb'))
+    disk_free = _float(system.get('diskFreeGb'))
+    disk = _percent(disk_total - disk_free if disk_total is not None and disk_free is not None else None, disk_total)
+    uptime = _uptime(system.get('uptimeSeconds'))
+    cores = system.get('cpuCount')
+
+    _row(draw, 0, f"PI {system.get('hostname') or ''}".strip(), f'UP {uptime}' if uptime else '', shift, width)
+    _bar_row(draw, 1, f"CPU {f'{cpu:.0f}' if cpu is not None else '--'}%", cpu, shift, width)
+    _bar_row(draw, 2, f"RAM {f'{memory:.0f}' if memory is not None else '--'}%", memory, shift, width)
+    _bar_row(draw, 3, f"SD {f'{disk:.0f}' if disk is not None else '--'}%", disk, shift, width)
+    # 85 C is where the Pi starts throttling, so the bar is full at that point.
+    _bar_row(
+        draw, 4,
+        f"{F.THERMO}{f'{temperature:.0f}' if temperature is not None else '--'}{F.DEGREE}C",
+        _percent(temperature, 85.0),
+        shift, width,
+    )
+    _row(draw, 5, _memory_text(system), _storage_text(system), shift, width)
+
+    load = system.get('loadAverage')
+    load_text = 'LOAD --'
+    if isinstance(load, (list, tuple)) and load:
+        load_text = f'LOAD {float(load[0]):.2f}'
+    if cores:
+        load_text += f' /{cores}'
+    _row(draw, 6, load_text, power_status(system.get('throttled')), shift, width)
+
+
 _PAGE_BODIES = {
     'dashboard': _draw_overview,
+    'overview': _draw_overview_health,
     'obd': _draw_obd,
     'gps': _draw_gps,
     'imu': _draw_imu,
-    'system': _draw_system,
+    'cloud': _draw_cloud,
+    'pi': _draw_pi,
 }
 
 
@@ -518,7 +666,9 @@ def render_page(
     draw = ImageDraw.Draw(image)
     # Every glyph leaves its right-hand column blank, so a 1px shift never clips.
     shift = max(0, min(1, shift))
-    _status_row(draw, snapshot, width, shift, blink_on=tick % 2 == 0, page_index=PAGES.index(page))
+    # The dashboard is the original one-screen layout, Pi temperature included.
+    page_index = None if page == 'dashboard' else PAGES.index(page)
+    _status_row(draw, snapshot, width, shift, blink_on=tick % 2 == 0, page_index=page_index)
     _PAGE_BODIES[page](draw, snapshot, shift, width, web_port, tick)
 
     alert = _alert(snapshot)
@@ -651,15 +801,36 @@ def splash_frame(width: int, height: int, device_id: str) -> Image.Image:
     return image
 
 
+def page_durations(
+    page_seconds: float = 20.0, dashboard_seconds: float = 60.0, include_qr: bool = True
+) -> list[tuple[str, float]]:
+    return [
+        (page, max(1.0, dashboard_seconds if page == 'dashboard' else page_seconds))
+        for page in PAGES
+        if include_qr or page != 'qr'
+    ]
+
+
 def current_page(
-    snapshot: dict, elapsed: float, boot_qr_seconds: float, now: float, page_seconds: float = 5.0
+    snapshot: dict,
+    elapsed: float,
+    boot_qr_seconds: float,
+    now: float,
+    page_seconds: float = 20.0,
+    dashboard_seconds: float = 60.0,
 ) -> str:
     """QR while the boot window is open or a request is active, else the rotating pages."""
     requested_until = _float(snapshot.get('oled', {}).get('qrUntil'))
     if elapsed < boot_qr_seconds or (requested_until is not None and now < requested_until):
         return 'qr'
-    carousel = max(0.0, elapsed - boot_qr_seconds)
-    return PAGES[int(carousel / max(1.0, page_seconds)) % len(PAGES)]
+    has_link = bool(snapshot.get('system', {}).get('ipAddress'))
+    durations = page_durations(page_seconds, dashboard_seconds, include_qr=has_link)
+    position = max(0.0, elapsed - boot_qr_seconds) % sum(seconds for _, seconds in durations)
+    for page, seconds in durations:
+        if position < seconds:
+            return page
+        position -= seconds
+    return PAGES[0]
 
 
 class OLEDDisplay:
@@ -724,7 +895,12 @@ def worker(settings: Settings, state: DeviceState, stop: threading.Event):
                 elapsed = max(0.0, time.monotonic() - started)
                 snapshot = state.snapshot()
                 page = current_page(
-                    snapshot, elapsed, settings.oled_access_seconds, time.time(), settings.oled_page_seconds
+                    snapshot,
+                    elapsed,
+                    settings.oled_access_seconds,
+                    time.time(),
+                    settings.oled_page_seconds,
+                    settings.oled_dashboard_seconds,
                 )
                 frame = render_frame(
                     snapshot,
@@ -827,7 +1003,7 @@ def sample_snapshot(device_id: str = 'PROTO-001', web_port: int = 8080) -> dict:
             'broker': 'mqtt.obd2.ragnogroup.com:8883',
             'tls': True,
         },
-        'frame': {'mode': 'active', 'queueDepth': 0, 'droppedMessages': 0},
+        'frame': {'mode': 'active', 'queueDepth': 0, 'queueBytes': 0, 'droppedMessages': 0},
         'system': {
             'ipAddress': '192.168.1.42',
             'hostname': socket.gethostname(),
@@ -841,6 +1017,9 @@ def sample_snapshot(device_id: str = 'PROTO-001', web_port: int = 8080) -> dict:
             'memoryTotalMb': 416,
             'diskFreeGb': 9.8,
             'diskTotalGb': 14.6,
+            'cpuCount': 4,
+            'loadAverage': [0.42, 0.38, 0.35],
+            'throttled': 0,
         },
         'events': {},
     }
@@ -867,17 +1046,30 @@ def preview_scenarios(device_id: str = 'PROTO-001') -> dict[str, tuple[dict, str
         events={'harshBraking': True},
     )
 
-    scenarios: dict[str, tuple[dict, str]] = {'qr': (healthy, 'qr')}
+    scenarios: dict[str, tuple[dict, str]] = {}
     for page in PAGES:
-        scenarios[f'{page}'] = (healthy, page)
+        scenarios[page] = (healthy, page)
     scenarios.update(
         {
             'dashboard-obd-down': (obd_down, 'dashboard'),
+            'overview-problems': (
+                variant(
+                    obd={'connected': False, 'error': 'python-OBD did not reach CAR_CONNECTED', 'signals': {}},
+                    gps={'validFix': False, 'satellites': 3},
+                    publisher={'connected': False, 'error': 'timed out'},
+                    system={'throttled': 0x50005},
+                ),
+                'overview',
+            ),
             'obd-down': (obd_down, 'obd'),
             'gps-no-fix': (no_fix, 'gps'),
             'imu-calibrating': (calibrating, 'imu'),
             'imu-harsh-braking': (braking, 'imu'),
-            'system-cloud-offline': (cloud_down, 'system'),
+            'cloud-offline': (cloud_down, 'cloud'),
+            'pi-under-voltage': (
+                variant(system={'cpuPercent': 96, 'temperatureC': 81.5, 'throttled': 0x50005, 'memoryUsedMb': 390}),
+                'pi',
+            ),
             'impact-alert': (variant(events={'possibleImpact': True}), 'dashboard'),
         }
     )

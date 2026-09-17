@@ -100,7 +100,7 @@ def test_disabled_cloud_is_not_reported_as_a_problem():
 @pytest.mark.parametrize(
     ('message', 'label'),
     [
-        ('python-OBD did not reach CAR_CONNECTED (status=ELM Connected)', 'NO ECU - IGNITION ON?'),
+        ('python-OBD did not reach CAR_CONNECTED (status=ELM Connected)', 'NO ECU/IGN OFF'),
         ('[Errno -2] Name or service not known', 'DNS FAILED'),
         ('Not authorized', 'AUTH REJECTED'),
         ('MQTT_USERNAME and MQTT_PASSWORD must both be set in telemetry.env', 'NO CREDENTIALS'),
@@ -127,24 +127,72 @@ def test_queue_depth_reads_the_outbox_sections_not_the_old_mqtt_section():
     assert queue_depth({'mqtt': {'bufferedMessages': 9}}) == 0
 
 
-def test_qr_at_boot_then_pages_rotate_and_qr_on_request():
-    assert current_page({}, elapsed=5, boot_qr_seconds=20, now=1000, page_seconds=5) == 'qr'
-    rotation = [current_page({}, elapsed=20 + 5 * index, boot_qr_seconds=20, now=1000, page_seconds=5) for index in range(6)]
-    assert rotation == ['dashboard', 'obd', 'gps', 'imu', 'system', 'dashboard']
-    requested = {'oled': {'qrUntil': 1060}}
-    assert current_page(requested, elapsed=500, boot_qr_seconds=20, now=1000, page_seconds=5) == 'qr'
-    assert current_page(requested, elapsed=500, boot_qr_seconds=20, now=1061, page_seconds=5) != 'qr'
+def test_dashboard_shows_a_minute_then_each_page_twenty_seconds_including_qr():
+    snapshot = sample_snapshot()
+    assert current_page(snapshot, elapsed=5, boot_qr_seconds=20, now=1000) == 'qr'
+
+    def page_at(seconds_after_boot_qr, state=snapshot):
+        return current_page(state, 20 + seconds_after_boot_qr, 20, 1000, page_seconds=20, dashboard_seconds=60)
+
+    assert page_at(0) == 'dashboard'
+    assert page_at(59.9) == 'dashboard'
+    order = [page_at(60 + 20 * index) for index in range(7)]
+    assert order == ['overview', 'obd', 'gps', 'imu', 'cloud', 'pi', 'qr']
+    assert page_at(60 + 20 * 7) == 'dashboard'
+
+    # Without a network address there is no link, so the QR slot is skipped.
+    offline = sample_snapshot()
+    offline['system']['ipAddress'] = None
+    assert [page_at(60 + 20 * index, offline) for index in range(7)] == [
+        'overview', 'obd', 'gps', 'imu', 'cloud', 'pi', 'dashboard'
+    ]
+
+    requested = {**snapshot, 'oled': {'qrUntil': 1060}}
+    assert current_page(requested, elapsed=500, boot_qr_seconds=20, now=1000) == 'qr'
+    assert current_page(requested, elapsed=500, boot_qr_seconds=20, now=1061) == 'obd'
 
 
-def test_each_sensor_page_is_distinct_and_marks_its_position():
+def test_each_page_is_distinct_and_marks_its_position():
     snapshot = sample_snapshot()
     frames = {page: render_frame(snapshot, page) for page in PAGES}
     assert len({frame.tobytes() for frame in frames.values()}) == len(PAGES)
-    icons = {frame.crop((0, 0, 100, 8)).tobytes() for frame in frames.values()}
-    dots = {frame.crop((100, 0, 128, 8)).tobytes() for frame in frames.values()}
+    rotating = [page for page in PAGES if page not in ('dashboard', 'qr')]
+    icons = {frames[page].crop((0, 0, 85, 8)).tobytes() for page in rotating}
+    dots = {frames[page].crop((85, 0, 128, 8)).tobytes() for page in rotating}
     # Same status icons on every page; only the page-position marker moves.
     assert len(icons) == 1
-    assert len(dots) == len(PAGES)
+    assert len(dots) == len(rotating)
+    # The dashboard keeps the Pi temperature in that corner instead.
+    assert frames['dashboard'].crop((0, 0, 85, 8)).tobytes() in icons
+
+
+def test_default_timing_is_one_minute_dashboard_and_twenty_second_pages(monkeypatch, tmp_path):
+    for key in ('OLED_PAGE_SECONDS', 'OLED_DASHBOARD_SECONDS'):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv('TELEMETRY_ENV', str(tmp_path / 'missing.env'))
+    monkeypatch.chdir(tmp_path)
+    configured = settings()
+    assert configured.oled_dashboard_seconds == 60
+    assert configured.oled_page_seconds == 20
+
+
+def test_pi_page_bars_and_power_status():
+    healthy = sample_snapshot()
+    stressed = sample_snapshot()
+    stressed['system'].update(cpuPercent=96, memoryUsedMb=400, temperatureC=82)
+    assert render_frame(healthy, 'pi').tobytes() != render_frame(stressed, 'pi').tobytes()
+    assert oled.power_status(0) == f'PWR {F.CHECK}'
+    assert oled.power_status(0x50005) == '!LOW VOLTS'
+    assert oled.power_status(0x50000) == 'LOW V SEEN'
+    assert oled.power_status(0x4) == '!THROTTLED'
+    assert oled.power_status(None) == 'PWR --'
+
+
+def test_overview_page_reports_each_subsystem():
+    scenarios = preview_scenarios()
+    healthy = render_frame(*scenarios['overview'])
+    problems_frame = render_frame(*scenarios['overview-problems'])
+    assert healthy.tobytes() != problems_frame.tobytes()
 
 
 @pytest.mark.parametrize('page', PAGES)
@@ -160,21 +208,11 @@ def test_every_page_fits_with_long_values_and_missing_data(page):
     assert render_frame(empty, page).getbbox() is not None
 
 
-def test_default_rotation_gives_each_page_twenty_seconds(monkeypatch, tmp_path):
-    monkeypatch.delenv('OLED_PAGE_SECONDS', raising=False)
-    monkeypatch.setenv('TELEMETRY_ENV', str(tmp_path / 'missing.env'))
-    monkeypatch.chdir(tmp_path)
-    page_seconds = settings().oled_page_seconds
-    assert page_seconds == 20
-    assert current_page({}, 19.9, 0, 0, page_seconds) == 'dashboard'
-    assert current_page({}, 20.0, 0, 0, page_seconds) == 'obd'
-
-
-def test_system_page_shows_memory_and_storage_usage():
+def test_pi_page_shows_memory_and_storage_usage():
     snapshot = sample_snapshot()
-    base = render_frame(snapshot, 'system')
+    base = render_frame(snapshot, 'pi')
     snapshot['system']['diskFreeGb'] = 1.2
-    assert render_frame(snapshot, 'system').tobytes() != base.tobytes()
+    assert render_frame(snapshot, 'pi').tobytes() != base.tobytes()
     snapshot['system']['memoryUsedMb'] = 400
     assert oled._memory_text(snapshot['system']) == 'RAM 400/416M'
     assert oled._storage_text(snapshot['system']) == 'SD 13.4/15G'

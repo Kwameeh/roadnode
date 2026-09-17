@@ -249,7 +249,7 @@ Key settings (every option is documented in `config/telemetry.env.example`):
 | IMU | `IMU_ORIENTATION` | `x-forward-y-left-z-up` | See [§8](#8-imu-mpu6050-setup-and-calibration) |
 | IMU events | `HARSH_ACCEL_MPS2`, `HARSH_BRAKE_MPS2`, `HARSH_CORNER_MPS2`, `IMPACT_G` | `3.0`, `-3.0`, `3.5`, `2.5` | Event thresholds |
 | OLED | `OLED_ENABLED`, `OLED_DRIVER`, `OLED_ADDRESS` | `true`, `sh1106`, `0x3C` | `ssd1306` also supported |
-| OLED | `OLED_PAGE_SECONDS`, `OLED_ACCESS_SECONDS` | `20`, `20` | Seconds per rotating page; seconds of QR code at boot |
+| OLED | `OLED_DASHBOARD_SECONDS`, `OLED_PAGE_SECONDS`, `OLED_ACCESS_SECONDS` | `60`, `20`, `20` | Dashboard time; time for each other page; QR code at boot |
 | OBD | `OBD_TRANSPORT` | `auto` | `auto`, `usb` or `bluetooth` |
 | OBD | `OBD_MAC`, `OBD_RFCOMM_CHANNEL`, `OBD_BLUETOOTH_CANDIDATES` | physical ELM327 | See [§10](#10-obd-ii-setup-usb-or-bluetooth) |
 | OBD | `OBD_BAUD`, `OBD_PROTOCOL`, `OBD_FAST` | `auto`, `auto`, `true` | |
@@ -338,26 +338,25 @@ sudo systemctl start car-telemetry.service
 Whichever driver draws correctly goes in `OLED_DRIVER`. Set
 `OLED_ENABLED=false` if no display is fitted.
 
-The display has **five rotating pages**, each shown for `OLED_PAGE_SECONDS`
-(**20 s** by default), in a small pixel font with icons. Every page has the
-same status row (OBD, GPS + satellites, cloud, Wi-Fi, Bluetooth, IMU: steady =
-OK, blinking = problem) and dots showing which page is up.
+The display rotates through eight pages in a small pixel font with icons.
+The main dashboard shows for **60 s** (`OLED_DASHBOARD_SECONDS`), every other
+page for **20 s** (`OLED_PAGE_SECONDS`):
 
 | Page | Shows |
 |---|---|
-| 1. Overview | Speed (big), RPM, coolant, volts, fuel, DTCs, cloud queue, drive mode, position, heading, Wi-Fi/BT names, IMU, CPU, uptime, web address alternating with problems |
-| 2. OBD-II | RPM, speed, load, throttle, coolant, intake temp, fuel, MAF, voltage, DTC count, VIN or connection error |
-| 3. GPS | Fix, satellites, lat/lon (6 decimals), UTC fix time, HDOP, speed, heading, altitude, NMEA arriving, port/baud, accuracy grade or problem |
-| 4. IMU | Acceleration X/Y/Z, gyro X/Y/Z, resultant g, sensor temperature, I2C address, calibration and orientation, driving events or sensor error |
-| 5. System & cloud | EMQX broker, port/TLS, frames sent/queued or error, Wi-Fi, hostname, web address, CPU %, CPU temperature, uptime, RAM used/total, SD card used/total |
+| 1. Dashboard (60 s) | Speed (big), RPM, coolant, volts, fuel, DTCs, cloud queue, drive mode, position, heading, Wi-Fi/BT names, IMU, CPU, uptime, Pi temperature, web address alternating with problems |
+| 2. Overview | One health line each for OBD, GPS, IMU, cloud, Wi-Fi, Bluetooth and the Pi, with the reason when something is wrong |
+| 3. OBD-II | RPM, speed, load, throttle, coolant, intake temp, fuel, MAF, voltage, DTC count, VIN or connection error |
+| 4. GPS | Fix, satellites, lat/lon (6 decimals), UTC fix time, HDOP, speed, heading, altitude, NMEA arriving, port/baud, accuracy grade or problem |
+| 5. IMU | Acceleration X/Y/Z, gyro X/Y/Z, resultant g, sensor temperature, I2C address, calibration and orientation, driving events or sensor error |
+| 6. Cloud & network | EMQX broker, port/TLS, sent/replayed/rejected or error, queue, Wi-Fi, hostname, web address, dropped frames, outbox size |
+| 7. Pi health | Bar graphs for CPU, RAM, SD card and temperature; RAM and SD used/total; uptime; load average; power/throttling status (`!LOW VOLTS` means a weak power supply) |
+| 8. QR code | Scan to open the local web app (skipped without a network address) |
 
-Problems are spelled out, for example `!OBD BT I/O ERROR`,
-`!CLOUD TLS CERT FAILED`, `!NO NETWORK - JOIN WIFI`, `NEEDS SKY VIEW` or
-`CAL 64% KEEP STILL`. An impact or coolant ≥ 110 °C shows an inverted banner on
-whichever page is up.
+An impact or coolant ≥ 110 °C shows an inverted banner on whichever page is up.
 
-**QR code:** for `OLED_ACCESS_SECONDS` (20 s) after boot the display shows a QR
-code that opens the local web app (`http://<pi-ip>:8080`). Show it again for
+**QR code:** the QR page opens the local web app (`http://<pi-ip>:8080`). It
+also shows for `OLED_ACCESS_SECONDS` (20 s) after boot. Show it right away for
 60 s with **System → Show web app QR on display** in the web app, or:
 
 ```bash

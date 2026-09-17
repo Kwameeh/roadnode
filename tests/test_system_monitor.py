@@ -29,3 +29,10 @@ def test_bluetooth_device_returns_connected_name(monkeypatch):
 
     monkeypatch.setattr(system_monitor.bluetooth, 'devices', lambda: devices[:1])
     assert system_monitor._bluetooth_device() is None
+
+
+def test_throttled_flags_parse_vcgencmd(monkeypatch):
+    monkeypatch.setattr(system_monitor, 'run', lambda *args, **kwargs: (0, 'throttled=0x50005', ''))
+    assert system_monitor._throttled() == 0x50005
+    monkeypatch.setattr(system_monitor, 'run', lambda *args, **kwargs: (127, '', 'vcgencmd is not installed'))
+    assert system_monitor._throttled() is None
