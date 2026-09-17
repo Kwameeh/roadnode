@@ -249,6 +249,7 @@ Key settings (every option is documented in `config/telemetry.env.example`):
 | IMU | `IMU_ORIENTATION` | `x-forward-y-left-z-up` | See [§8](#8-imu-mpu6050-setup-and-calibration) |
 | IMU events | `HARSH_ACCEL_MPS2`, `HARSH_BRAKE_MPS2`, `HARSH_CORNER_MPS2`, `IMPACT_G` | `3.0`, `-3.0`, `3.5`, `2.5` | Event thresholds |
 | OLED | `OLED_ENABLED`, `OLED_DRIVER`, `OLED_ADDRESS` | `true`, `sh1106`, `0x3C` | `ssd1306` also supported |
+| OLED | `OLED_PAGE_SECONDS`, `OLED_ACCESS_SECONDS` | `20`, `20` | Seconds per rotating page; seconds of QR code at boot |
 | OBD | `OBD_TRANSPORT` | `auto` | `auto`, `usb` or `bluetooth` |
 | OBD | `OBD_MAC`, `OBD_RFCOMM_CHANNEL`, `OBD_BLUETOOTH_CANDIDATES` | physical ELM327 | See [§10](#10-obd-ii-setup-usb-or-bluetooth) |
 | OBD | `OBD_BAUD`, `OBD_PROTOCOL`, `OBD_FAST` | `auto`, `auto`, `true` | |
@@ -337,24 +338,23 @@ sudo systemctl start car-telemetry.service
 Whichever driver draws correctly goes in `OLED_DRIVER`. Set
 `OLED_ENABLED=false` if no display is fitted.
 
-The display has **one constant dashboard** (nothing rotates) in a small pixel
-font with icons:
+The display has **five rotating pages**, each shown for `OLED_PAGE_SECONDS`
+(**20 s** by default), in a small pixel font with icons. Every page has the
+same status row (OBD, GPS + satellites, cloud, Wi-Fi, Bluetooth, IMU: steady =
+OK, blinking = problem) and dots showing which page is up.
 
-```text
-🚗 📍9 ☁ WiFi BT IMU                 47°C   status: steady = OK, blinking = problem, - = off
- 72   ⟳2450 🌡91°                           speed (big) · RPM · coolant
-      ⚡13.9V 💧64%                          volts · fuel
-KM/H  ⚠0 ⇪0                      ACTIVE     stored DTCs · cloud queue · driving mode
-📍5.6037,-0.1870           241°SW           position · heading
-WiFi ROADNODE-WIFI          BT OBDII        network · Bluetooth device
-IMU ✓ 0.04G               18% 2H14M         IMU · g-force · CPU · uptime
-192.168.1.42:8080                           web address, alternating with problems
-```
+| Page | Shows |
+|---|---|
+| 1. Overview | Speed (big), RPM, coolant, volts, fuel, DTCs, cloud queue, drive mode, position, heading, Wi-Fi/BT names, IMU, CPU, uptime, web address alternating with problems |
+| 2. OBD-II | RPM, speed, load, throttle, coolant, intake temp, fuel, MAF, voltage, DTC count, VIN or connection error |
+| 3. GPS | Fix, satellites, lat/lon (6 decimals), UTC fix time, HDOP, speed, heading, altitude, NMEA arriving, port/baud, accuracy grade or problem |
+| 4. IMU | Acceleration X/Y/Z, gyro X/Y/Z, resultant g, sensor temperature, I2C address, calibration and orientation, driving events or sensor error |
+| 5. System & cloud | EMQX broker, port/TLS, frames sent/queued or error, Wi-Fi, hostname, web address, CPU %, CPU temperature, uptime, RAM used/total, SD card used/total |
 
-The bottom line takes turns with plain-language problems such as
-`!OBD BT I/O ERROR`, `!CLOUD TLS CERT FAILED`, `!NO NETWORK - JOIN WIFI` or
-`!IMU CAL 64% KEEP STILL`. An impact or coolant ≥ 110 °C shows an inverted
-banner over the speed block.
+Problems are spelled out, for example `!OBD BT I/O ERROR`,
+`!CLOUD TLS CERT FAILED`, `!NO NETWORK - JOIN WIFI`, `NEEDS SKY VIEW` or
+`CAL 64% KEEP STILL`. An impact or coolant ≥ 110 °C shows an inverted banner on
+whichever page is up.
 
 **QR code:** for `OLED_ACCESS_SECONDS` (20 s) after boot the display shows a QR
 code that opens the local web app (`http://<pi-ip>:8080`). Show it again for
@@ -579,7 +579,7 @@ existing env file.
 | `telemetry bluetooth-scan --seconds 10` | Scan through the engine |
 | `telemetry bluetooth-pair --mac MAC --pin 1234` | Pair through the engine |
 | `telemetry bluetooth-use-elm --mac MAC [--channel N]` | Save a Bluetooth ELM327 |
-| `telemetry oled-test --driver sh1106\|ssd1306` | Draw every dashboard scenario on the display (stop the engine first) |
+| `telemetry oled-test --driver sh1106\|ssd1306` | Draw every page and failure case on the display (stop the engine first) |
 | `telemetry oled-qr [--seconds 60]` | Show the web app QR code on the display |
 | `telemetry oled-preview --out DIR` | Save enlarged PNGs of every display screen |
 | `telemetry benchmark --seconds 120 --web-clients 5` | Load test; writes `benchmark-report.json` |

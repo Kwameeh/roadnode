@@ -49,7 +49,7 @@ def test_realtime_oled_and_mqtt_defaults(monkeypatch, tmp_path):
     assert configured.imu_calibration_settle_seconds == 2
     assert configured.imu_calibration_retry_seconds == 5
     assert configured.oled_address == 0x3C
-    assert configured.oled_page_seconds == 3
+    assert configured.oled_page_seconds == 20
     assert configured.oled_access_seconds == 20
     assert configured.web_state_refresh_seconds == 0.2
     assert configured.web_heartbeat_seconds == 5
