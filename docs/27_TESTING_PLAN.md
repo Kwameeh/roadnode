@@ -6,6 +6,7 @@ Recommended order:
 2. GPS raw/parsed data
 3. I2C OLED/MPU6050
 4. Bluetooth web scan/pair with Android ELM327 emulator
+   - switch profiles both ways: `telemetry obd-profile android`, then `telemetry obd-profile obd2`; check `telemetry obd-profile current` and `rfcomm` after each
 5. python-OBD connection and supported-command discovery
 6. VIN attempt
 7. live core signals and optional-signal selection

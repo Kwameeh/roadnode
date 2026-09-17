@@ -10,6 +10,12 @@ Previously verified on Prototype 1 hardware:
 
 The new python-OBD headless-web/VIN/DTC revision still needs to be deployed and validated on the Pi and then on a real vehicle.
 
+Verified on the Pi Zero 2 W on 2026-09-17:
+
+- `telemetry obd-profile android` switched the OBD link from the physical ELM327 (`00:10:CC:4F:36:03`, channel 1) to the Android ELM327 Emulator (`EC:46:2C:93:7E:F4`, channel 7) with the emulator server running, with no manual `telemetry.env` edits or `rfcomm` commands.
+
+Still to verify: switching back with `telemetry obd-profile obd2`, and `--reboot` cold-start binding.
+
 Verified in automated tests on the development host:
 
 - normalized GPS/OBD/IMU/device timestamps, units, source, quality, and frame-window selection
