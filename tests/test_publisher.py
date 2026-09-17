@@ -409,3 +409,97 @@ def test_disabled_worker_says_why(outbox):
         "connected": False,
         "error": "MQTT_ENABLED is false",
     }
+
+
+class PipelinedBroker(FakeBroker):
+    """Records when each message was sent and when its PUBACK was collected."""
+
+    def __init__(self, *, unacknowledged=(), **kwargs):
+        super().__init__(**kwargs)
+        self.events: list[tuple[str, int]] = []
+        self.unacknowledged = set(unacknowledged)
+
+    def publish_nowait(self, topic, payload, **kwargs):
+        document = json.loads(payload.decode("utf-8"))
+        self.events.append(("send", document["sequence"]))
+        self.received.append({"topic": topic, "document": document, **kwargs})
+        return document["sequence"]
+
+    def wait_for_ack(self, pending, timeout):
+        self.events.append(("ack", pending))
+        return PublishResult(acknowledged=pending not in self.unacknowledged, reason="simulated timeout")
+
+
+def test_pipelined_drain_sends_the_batch_in_order_before_collecting_pubacks(outbox):
+    for sequence in range(1, 6):
+        enqueue(outbox, sequence)
+    broker = PipelinedBroker()
+
+    report = drain_once(outbox, broker, device_id=DEVICE, now=BASE, batch_size=5)
+
+    assert report.published == 5
+    assert outbox.depth() == 0
+    assert broker.events == [("send", n) for n in range(1, 6)] + [("ack", n) for n in range(1, 6)]
+    assert [sent["document"]["sequence"] for sent in broker.received] == [1, 2, 3, 4, 5]
+    assert broker.received[0]["qos"] == 1
+    assert broker.received[0]["content_type"] == CONTENT_TYPE
+
+
+def test_pipelined_drain_keeps_only_the_rows_without_puback(outbox):
+    for sequence in range(1, 5):
+        enqueue(outbox, sequence)
+    broker = PipelinedBroker(unacknowledged={2})
+
+    report = drain_once(outbox, broker, device_id=DEVICE, now=BASE, batch_size=4)
+
+    assert report.published == 3
+    assert report.failed == 1
+    assert outbox.depth() == 1
+    remaining = outbox.batch(10)[0]
+    assert json.loads(remaining.payload)["sequence"] == 2
+    assert remaining.attempts == 1
+
+
+def test_pipelined_drain_stops_sending_when_the_connection_drops(outbox):
+    for sequence in range(1, 4):
+        enqueue(outbox, sequence)
+    broker = PipelinedBroker()
+    original = broker.publish_nowait
+
+    def send_then_disconnect(topic, payload, **kwargs):
+        handle = original(topic, payload, **kwargs)
+        broker.connected = False
+        return handle
+
+    broker.publish_nowait = send_then_disconnect
+    report = drain_once(outbox, broker, device_id=DEVICE, now=BASE, batch_size=3)
+
+    assert [event for event in broker.events if event[0] == "send"] == [("send", 1)]
+    assert report.published == 1
+    assert outbox.depth() == 2
+
+
+def test_worker_reports_why_the_broker_refused_the_connection(outbox):
+    import threading
+    from dataclasses import replace
+
+    from car_telemetry.config import settings
+    from car_telemetry.publisher import worker
+    from car_telemetry.state import DeviceState
+
+    stop = threading.Event()
+
+    class RefusingBroker(FakeBroker):
+        refused_reason = "Not authorized"
+
+        def connect(self):
+            self.connects += 1
+            stop.set()
+
+    configured = replace(settings(), device_id=DEVICE, mqtt_enabled=True, mqtt_host="broker.test")
+    state = DeviceState(DEVICE, "VEH-001", 1)
+    worker(configured, state, stop, outbox=outbox, transport=RefusingBroker(connected=False))
+
+    publisher = state.snapshot()["publisher"]
+    assert publisher["connected"] is False
+    assert publisher["error"] == "broker refused connection: Not authorized"

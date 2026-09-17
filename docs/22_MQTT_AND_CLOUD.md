@@ -42,6 +42,19 @@ only after MQTT PUBACK. After an outage, the publisher reconnects with backoff,
 replays the oldest frames first, preserves their identity and capture time, and
 marks them as replayed. Default retention is 256 MiB or 24 hours.
 
+Each drain batch (`OUTBOX_BATCH_SIZE`, 50) is sent in order without waiting
+for each PUBACK, with up to 20 messages in flight, and the PUBACKs are
+collected afterwards. Waiting for every PUBACK before sending the next frame
+costs one network round trip per frame, which is too slow to catch up after an
+outage while new frames keep arriving every second: the cloud then receives
+only old frames and live views look stuck on "connecting".
+
+Catching up can be watched with `telemetry status`: `frame.queueDepth` should
+fall quickly while `publisher.published` rises.
+
+When the broker refuses a login, `publisher.error` (and the OLED and web app)
+show the reason, for example `broker refused connection: Not authorized`.
+
 ## Healthy status
 
 `telemetry status` should show `publisher.connected=true`, an increasing

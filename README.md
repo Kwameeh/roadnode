@@ -673,6 +673,7 @@ sudo reboot
 | Pairing fails | Wrong PIN or old pairing | `bluetoothctl remove MAC`, retry with `1234`, then `1111` |
 | `obd.connected` false with rfcomm0 bound | Ignition off / no ECU | Turn the ignition on; test with `minicom` (`ATZ`, `0100`) |
 | `publisher.connected` false | DNS, port 8883, CA, credentials | `openssl s_client` check above; re-check `MQTT_*`; Admin broker access READY |
+| Cloud connected but apps show old data or "connecting" | Outbox backlog after an outage (`frame.queueDepth` in the thousands) | Update to the latest RoadNode (sends batches in parallel); watch `queueDepth` fall with `telemetry status` |
 | `published` stuck, queue growing | Broker rejects the publish (ACL) | Admin → device → **Verify / Repair broker access** |
 | Admin shows nothing | Device not assigned to a vehicle | Assign it in Admin |
 | Web page unreachable | Different network, `.local` unsupported | Use the IP from `telemetry web-url` or the OLED |

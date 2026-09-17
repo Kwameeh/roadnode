@@ -380,3 +380,17 @@ def test_save_previews_writes_enlarged_pngs(tmp_path):
     paths = oled.save_previews(str(tmp_path), scale=2)
     assert len(paths) == len(preview_scenarios())
     assert Image.open(paths[0]).size == (256, 128)
+
+
+@pytest.mark.parametrize(
+    ('message', 'label'),
+    [
+        ('broker refused connection: Not authorized', 'AUTH REJECTED'),
+        ('broker refused connection: Bad user name or password', 'AUTH REJECTED'),
+        ('[Errno 2] No such file or directory', 'CA CERT MISSING'),
+        ('broker connection not established', 'NO CONNACK'),
+        ('[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed', 'TLS CERT FAILED'),
+    ],
+)
+def test_cloud_error_labels(message, label):
+    assert oled.cloud_error(message, 'CONNECTING') == label

@@ -4,6 +4,7 @@ import json
 import logging
 import ssl
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
@@ -25,6 +26,9 @@ CONTENT_TYPE = "application/json"
 PAYLOAD_FORMAT_UTF8 = 1
 DEFAULT_REPLAY_AFTER_SECONDS = 5.0
 MAX_BACKOFF_SECONDS = 60.0
+# QoS-1 messages sent before waiting for their PUBACKs. EMQX accepts 32 by
+# default (MQTT 5 Receive Maximum), so 20 stays below it.
+MAX_INFLIGHT = 20
 
 
 def credential_from_settings(settings: Settings) -> DeviceCredential:
@@ -79,6 +83,29 @@ class Transport(Protocol):
     def disconnect(self) -> None: ...
 
 
+class PipelinedTransport(Transport, Protocol):
+    """A transport that sends several QoS-1 messages before their PUBACKs arrive.
+
+    Waiting for each PUBACK before sending the next message costs a network
+    round trip per frame, which is too slow to drain a backlog after an outage
+    while new frames keep arriving. Messages still leave in queue order.
+    """
+
+    def publish_nowait(
+        self,
+        topic: str,
+        payload: bytes,
+        *,
+        qos: int,
+        retain: bool,
+        content_type: str,
+        payload_format_indicator: int,
+        message_expiry_interval: int | None = None,
+    ) -> Any: ...
+
+    def wait_for_ack(self, pending: Any, timeout: float) -> PublishResult: ...
+
+
 # --- replay semantics (MQTT-005) -------------------------------------------
 
 
@@ -123,6 +150,49 @@ class DrainReport:
     replayed: int = 0
 
 
+def _prepare(
+    outbox: SqliteOutbox,
+    item: OutboxItem,
+    *,
+    device_id: str,
+    now: datetime,
+    replay_after_seconds: float,
+    report: DrainReport,
+) -> tuple[bytes, bool] | None:
+    """Payload and replay flag for one row, or None if the row was dropped."""
+    # Enforce the same exact-namespace rule the broker ACL applies.
+    try:
+        assert_publish_allowed(device_id, item.topic)
+    except Exception as exc:
+        LOGGER.error("dropping unpublishable message %s: %s", item.message_id, exc)
+        outbox.delete(item.message_id)
+        report.rejected += 1
+        return None
+
+    replay = should_replay(item, now=now, replay_after_seconds=replay_after_seconds)
+    try:
+        payload = prepare_for_send(item.payload, sent_at=utc_iso(now), replay=replay)
+    except (ValueError, UnicodeDecodeError) as exc:
+        LOGGER.error("dropping malformed message %s: %s", item.message_id, exc)
+        outbox.delete(item.message_id)
+        report.rejected += 1
+        return None
+    return payload, replay
+
+
+def _settle(outbox: SqliteOutbox, item: OutboxItem, replay: bool, result: PublishResult, report: DrainReport) -> bool:
+    if result.acknowledged:
+        outbox.delete(item.message_id)
+        report.published += 1
+        if replay:
+            report.replayed += 1
+        return True
+    LOGGER.warning("no PUBACK for %s: %s", item.message_id, result.reason or "timeout")
+    outbox.record_attempt(item.message_id)
+    report.failed += 1
+    return False
+
+
 def drain_once(
     outbox: SqliteOutbox,
     transport: Transport,
@@ -131,69 +201,58 @@ def drain_once(
     batch_size: int = 50,
     now: datetime | None = None,
     replay_after_seconds: float = DEFAULT_REPLAY_AFTER_SECONDS,
+    ack_timeout: float = 10.0,
 ) -> DrainReport:
     """Publish oldest-first; delete a row only after PUBACK.
 
     A message the broker refuses on authorization grounds is dropped, because
     retrying it would block the queue forever. Every other failure keeps the
     row and records an attempt.
+
+    A transport that supports it gets the whole batch sent in order before the
+    PUBACKs are collected, so a backlog drains at network speed instead of one
+    round trip per frame.
     """
     report = DrainReport()
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    pipelined = callable(getattr(transport, "publish_nowait", None))
+    pending: list[tuple[OutboxItem, bool, Any]] = []
 
     for item in outbox.batch(batch_size):
         if not transport.connected:
             break
-
-        # Enforce the same exact-namespace rule the broker ACL applies.
-        try:
-            assert_publish_allowed(device_id, item.topic)
-        except Exception as exc:
-            LOGGER.error("dropping unpublishable message %s: %s", item.message_id, exc)
-            outbox.delete(item.message_id)
-            report.rejected += 1
+        prepared = _prepare(
+            outbox, item, device_id=device_id, now=current,
+            replay_after_seconds=replay_after_seconds, report=report,
+        )
+        if prepared is None:
             continue
-
-        replay = should_replay(
-            item, now=current, replay_after_seconds=replay_after_seconds
+        payload, replay = prepared
+        options = dict(
+            qos=item.qos,
+            retain=item.retain,
+            content_type=CONTENT_TYPE,
+            payload_format_indicator=PAYLOAD_FORMAT_UTF8,
         )
         try:
-            payload = prepare_for_send(
-                item.payload, sent_at=utc_iso(current), replay=replay
-            )
-        except (ValueError, UnicodeDecodeError) as exc:
-            LOGGER.error("dropping malformed message %s: %s", item.message_id, exc)
-            outbox.delete(item.message_id)
-            report.rejected += 1
-            continue
-
-        try:
-            result = transport.publish(
-                item.topic,
-                payload,
-                qos=item.qos,
-                retain=item.retain,
-                content_type=CONTENT_TYPE,
-                payload_format_indicator=PAYLOAD_FORMAT_UTF8,
-            )
+            if pipelined:
+                pending.append((item, replay, transport.publish_nowait(item.topic, payload, **options)))
+                continue
+            result = transport.publish(item.topic, payload, **options)
         except Exception as exc:  # transport error: keep the row
             LOGGER.warning("publish failed for %s: %s", item.message_id, exc)
             outbox.record_attempt(item.message_id)
             report.failed += 1
             break
-
-        if result.acknowledged:
-            outbox.delete(item.message_id)
-            report.published += 1
-            if replay:
-                report.replayed += 1
-        else:
-            LOGGER.warning(
-                "no PUBACK for %s: %s", item.message_id, result.reason or "timeout"
-            )
-            outbox.record_attempt(item.message_id)
-            report.failed += 1
+        if not _settle(outbox, item, replay, result, report):
             break
+
+    if pending:
+        # Allow extra time per message: a slow mobile uplink sends a full batch slowly.
+        deadline = time.monotonic() + ack_timeout + 0.5 * len(pending)
+        for item, replay, handle in pending:
+            result = transport.wait_for_ack(handle, max(0.0, deadline - time.monotonic()))
+            _settle(outbox, item, replay, result, report)
 
     return report
 
@@ -233,6 +292,9 @@ class PahoTransport:
                 cert_reqs=ssl.CERT_REQUIRED,
                 tls_version=ssl.PROTOCOL_TLS_CLIENT,
             )
+        self._client.max_inflight_messages_set(MAX_INFLIGHT)
+        # Set when the broker answers CONNACK with a failure, e.g. "Not authorized".
+        self.refused_reason: str | None = None
         self._connected = threading.Event()
         self._client.on_connect = self._on_connect
         self._client.on_disconnect = self._on_disconnect
@@ -240,7 +302,9 @@ class PahoTransport:
     def _on_connect(self, _client, _userdata, _flags, reason_code, _properties=None):
         if getattr(reason_code, "is_failure", False):
             LOGGER.error("broker refused connection: %s", reason_code)
+            self.refused_reason = str(reason_code)
             return
+        self.refused_reason = None
         self._connected.set()
 
     def _on_disconnect(self, *_args, **_kwargs):
@@ -285,6 +349,38 @@ class PahoTransport:
         except (ValueError, RuntimeError) as exc:
             return PublishResult(acknowledged=False, reason=str(exc))
         if info.is_published():
+            return PublishResult(acknowledged=True)
+        return PublishResult(acknowledged=False, reason="no PUBACK before timeout")
+
+    def publish_nowait(
+        self,
+        topic: str,
+        payload: bytes,
+        *,
+        qos: int,
+        retain: bool,
+        content_type: str,
+        payload_format_indicator: int,
+        message_expiry_interval: int | None = None,
+    ):
+        from paho.mqtt.properties import Properties
+        from paho.mqtt.packettypes import PacketTypes
+
+        properties = Properties(PacketTypes.PUBLISH)
+        properties.ContentType = content_type
+        properties.PayloadFormatIndicator = payload_format_indicator
+        if message_expiry_interval is not None:
+            properties.MessageExpiryInterval = message_expiry_interval
+        return self._client.publish(topic, payload, qos=qos, retain=retain, properties=properties)
+
+    def wait_for_ack(self, pending, timeout: float) -> PublishResult:
+        if pending.rc != self._mqtt.MQTT_ERR_SUCCESS:
+            return PublishResult(acknowledged=False, reason=self._mqtt.error_string(pending.rc))
+        try:
+            pending.wait_for_publish(timeout=max(0.001, timeout))
+        except (ValueError, RuntimeError) as exc:
+            return PublishResult(acknowledged=False, reason=str(exc))
+        if pending.is_published():
             return PublishResult(acknowledged=True)
         return PublishResult(acknowledged=False, reason="no PUBACK before timeout")
 
@@ -358,7 +454,10 @@ def worker(
                 transport.connect()
                 state.merge("publisher", {"connected": transport.connected})
                 if not transport.connected:
-                    raise ConnectionError("broker connection not established")
+                    refused = getattr(transport, "refused_reason", None)
+                    raise ConnectionError(
+                        f"broker refused connection: {refused}" if refused else "broker connection not established"
+                    )
                 backoff = 1.0
 
             report = drain_once(
