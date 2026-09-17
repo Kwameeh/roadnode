@@ -9,7 +9,7 @@ from .bluetooth import bind, discover_channel
 from .common import read_json
 from .config import settings
 from .engine_client import EngineAPI
-from .obd_profiles import PROFILES, print_current, print_profiles, switch_profile
+from .obd_profiles import add_profile, delete_profile, make_profile, print_current, print_profiles, switch_profile
 from .obd_transport import resolve, usb_candidates
 
 
@@ -54,6 +54,41 @@ def all_python_obd_commands():
     return rows
 
 
+def run_obd_profile(s, args, parser) -> int:
+    action = [part.strip() for part in args.action]
+    verb = action[0].lower() if action else ''
+
+    if verb == 'list' and len(action) == 1:
+        print_profiles(s)
+        return 0
+    if verb == 'add':
+        if len(action) != 2 or not args.mac:
+            parser.error('usage: telemetry obd-profile add NAME --mac AA:BB:CC:DD:EE:FF [--channel N] [--pin 1234]')
+        return add_profile(s, action[1], args.mac, args.channel, args.pin, args.label)
+    if verb == 'remove':
+        if len(action) != 2:
+            parser.error('usage: telemetry obd-profile remove NAME')
+        return delete_profile(s, action[1])
+    if args.name and not args.mac:
+        parser.error('--name saves a device given with --mac; to switch to a saved profile use: telemetry obd-profile NAME')
+    if args.mac:
+        if action:
+            parser.error('use either a profile name or --mac, not both')
+        try:
+            profile = make_profile(args.mac, name=args.name, channel=args.channel, pins=args.pin, label=args.label)
+        except ValueError as exc:
+            print(exc)
+            return 2
+        return switch_profile(
+            s, profile, args.channel, args.reboot, args.verify_seconds, save_as=profile.id if args.name else None
+        )
+    if not action or (verb == 'current' and len(action) == 1):
+        return print_current(s)
+    if len(action) != 1:
+        parser.error('usage: telemetry obd-profile [list | current | NAME | add NAME --mac MAC | remove NAME | --mac MAC]')
+    return switch_profile(s, verb, args.channel, args.reboot, args.verify_seconds)
+
+
 def main():
     parser = argparse.ArgumentParser(prog='telemetry')
     sub = parser.add_subparsers(dest='cmd', required=True)
@@ -73,10 +108,18 @@ def main():
 
     obd_profile = sub.add_parser(
         'obd-profile',
-        help='switch the Bluetooth OBD adapter: list, current, or a profile id',
+        help='switch the Bluetooth OBD adapter by profile name or MAC address',
+        description=(
+            'list | current | NAME | add NAME --mac MAC | remove NAME | --mac MAC [--name NAME]. '
+            'Without --channel the RFCOMM channel is found automatically.'
+        ),
     )
-    obd_profile.add_argument('target', nargs='?', default='current', choices=['list', 'current', *PROFILES])
-    obd_profile.add_argument('--channel', type=int, help='skip SDP discovery and bind this RFCOMM channel')
+    obd_profile.add_argument('action', nargs='*', help='list, current, a profile name, add NAME, or remove NAME')
+    obd_profile.add_argument('--mac', help='switch to (or save) this Bluetooth address, e.g. AA:BB:CC:DD:EE:FF')
+    obd_profile.add_argument('--name', help='with --mac: save the device under this name for next time')
+    obd_profile.add_argument('--label', help='a description shown in the profile list')
+    obd_profile.add_argument('--channel', type=int, help='RFCOMM channel; omit to discover it with SDP')
+    obd_profile.add_argument('--pin', action='append', help='pairing PIN to try (repeatable); default 1234, 1111, 0000')
     obd_profile.add_argument('--reboot', action='store_true', help='save the profile and reboot the Pi')
     obd_profile.add_argument('--verify-seconds', type=float, default=45)
 
@@ -169,12 +212,7 @@ def main():
         return 0
 
     if args.cmd == 'obd-profile':
-        if args.target == 'list':
-            print_profiles(s)
-            return 0
-        if args.target == 'current':
-            return print_current(s)
-        return switch_profile(s, args.target, args.channel, args.reboot, args.verify_seconds)
+        return run_obd_profile(s, args, parser)
 
     if args.cmd == 'obd-reconnect':
         print(api.post('/obd/reconnect'))
